@@ -144,9 +144,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: L.setWallpaperAll, action: #selector(selectWallpaperForAll), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L.setStaticAll, action: #selector(setStaticForAll), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: L.pauseResumeAll, action: #selector(togglePauseAll), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: L.stopAll, action: #selector(stopAll), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: L.resumeAll, action: #selector(resumeAll), keyEquivalent: ""))
+        let allPaused = !activeSources.isEmpty && activeSources.keys.allSatisfy { pausedScreens.contains($0) }
+        menu.addItem(NSMenuItem(title: allPaused ? L.resumeAll : L.pauseAll, action: #selector(togglePauseAll), keyEquivalent: ""))
+        let hasActive = !activeSources.isEmpty
+        let hasRestorable = lastSources.keys.contains(where: { activeSources[$0] == nil })
+        if hasActive {
+            menu.addItem(NSMenuItem(title: L.stopAll, action: #selector(stopAll), keyEquivalent: ""))
+        } else if hasRestorable {
+            menu.addItem(NSMenuItem(title: L.restoreAll, action: #selector(resumeAll), keyEquivalent: ""))
+        }
         let muteItem = NSMenuItem(title: audioMuted ? L.unmuteAudio : L.muteAudio, action: #selector(toggleMute), keyEquivalent: "")
         menu.addItem(muteItem)
         menu.addItem(NSMenuItem.separator())
@@ -316,6 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePauseAll() {
         let shouldPause = !activeSources.keys.allSatisfy { pausedScreens.contains($0) }
         for name in activeSources.keys { setPaused(shouldPause, for: name) }
+        rebuildMenu()
     }
 
     private func setPaused(_ paused: Bool, for name: String) {
@@ -346,6 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activeSources.removeAll()
         pausedScreens.removeAll()
         applyStaticToAllScreens()
+        rebuildMenu()
     }
 
     @objc private func restoreScreen(_ sender: NSMenuItem) {
@@ -362,6 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let source = lastSources[name], FileManager.default.fileExists(atPath: source.path) else { continue }
             showWallpaper(screen: screen, source: source)
         }
+        rebuildMenu()
     }
 
     // MARK: - Actions: Static

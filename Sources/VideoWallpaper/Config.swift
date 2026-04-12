@@ -309,6 +309,7 @@ struct WEEffect: Decodable {
 
 struct WEEffectPass: Decodable {
     let material: String?
+    let constantshadervalues: [String: WEFlexDouble]?
 }
 
 struct WEInstanceOverride: Decodable {
@@ -719,16 +720,24 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         let vertSrc = allFiles[vertKey].flatMap { String(data: $0, encoding: .utf8) }
         let fragSrc = allFiles[fragKey].flatMap { String(data: $0, encoding: .utf8) }
 
-        // Collect params
+        // Collect params using raw material key names (lowercase)
+        // Priority: pass constantshadervalues > effect-level fields
         var params: [String: Float] = [:]
-        if let v = effect.animationspeed { params["g_AnimationSpeed"] = Float(v) }
-        if let v = effect.speed { params["g_FlowSpeed"] = Float(v) }
-        if let v = effect.strength { params["g_Strength"] = Float(v); params["g_FlowAmp"] = Float(v) }
-        if let v = effect.ripplestrength { params["g_Strength"] = Float(v) }
-        if let v = effect.scale { params["g_Scale"] = Float(v) }
-        if let v = effect.ratio { params["g_Ratio"] = Float(v) }
-        if let v = effect.scrollspeed { params["g_ScrollSpeed"] = Float(v) }
-        if let v = effect.scrolldirection { params["g_Direction"] = Float(v) }
+        // Effect-level fields (lowest priority)
+        if let v = effect.animationspeed { params["animationspeed"] = Float(v) }
+        if let v = effect.speed { params["speed"] = Float(v) }
+        if let v = effect.strength { params["strength"] = Float(v) }
+        if let v = effect.ripplestrength { params["ripplestrength"] = Float(v) }
+        if let v = effect.scale { params["scale"] = Float(v) }
+        if let v = effect.ratio { params["ratio"] = Float(v) }
+        if let v = effect.scrollspeed { params["scrollspeed"] = Float(v) }
+        if let v = effect.scrolldirection { params["scrolldirection"] = Float(v) }
+        // Pass constantshadervalues override (highest priority, this is where WE stores them)
+        for pass in effect.passes ?? [] {
+            for (key, val) in pass.constantshadervalues ?? [:] {
+                params[key] = Float(val.value)
+            }
+        }
 
         // Extract textures
         var maskPath: String?

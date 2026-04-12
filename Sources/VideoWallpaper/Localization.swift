@@ -8,13 +8,14 @@ enum Lang: String, Codable {
 struct L {
     static var lang: Lang = .en
 
-    static var dynamicScreens: String { lang == .zh ? "屏幕壁纸" : "Screen Wallpaper" }
-    static var staticScreens: String { lang == .zh ? "停止/退出状态壁纸" : "Idle Wallpaper" }
-    static var setWallpaperAll: String { lang == .zh ? "统一设置壁纸…" : "Set Wallpaper for All…" }
-    static var setStaticAll: String { lang == .zh ? "统一设置停止/退出状态壁纸…" : "Set Idle Wallpaper for All…" }
-    static var pauseResumeAll: String { lang == .zh ? "全部暂停/继续" : "Pause/Resume All" }
+    static var dynamicScreens: String { lang == .zh ? "设置动态壁纸" : "Dynamic Wallpaper" }
+    static var staticScreens: String { lang == .zh ? "设置退出状态壁纸" : "Idle Wallpaper" }
+    static var setWallpaperAll: String { lang == .zh ? "统一设置动态壁纸…" : "Set Dynamic Wallpaper for All…" }
+    static var setStaticAll: String { lang == .zh ? "统一设置退出状态壁纸…" : "Set Idle Wallpaper for All…" }
+    static var pauseAll: String { lang == .zh ? "全部暂停" : "Pause All" }
+    static var resumeAll: String { lang == .zh ? "全部继续" : "Resume All" }
     static var stopAll: String { lang == .zh ? "全部停止" : "Stop All" }
-    static var resumeAll: String { lang == .zh ? "全部恢复" : "Resume All" }
+    static var restoreAll: String { lang == .zh ? "全部恢复" : "Restore All" }
     static var solidBlack: String { lang == .zh ? "纯黑" : "Solid Black" }
     static var chooseImage: String { lang == .zh ? "选择图片…" : "Choose Image…" }
     static var language: String { lang == .zh ? "语言" : "Language" }

@@ -1,30 +1,76 @@
 # VideoWallpaper
 
-A macOS menu bar app that plays videos, images, or Wallpaper Engine wallpapers as your desktop wallpaper. Features a Metal-based scene rendering engine for WE Scene wallpapers.
+A macOS menu bar app that plays videos, images, or Wallpaper Engine wallpapers as your desktop wallpaper. Features a Metal-based scene rendering engine.
 
 ## Features
 
 - **Video wallpaper** — loop any video (mp4, mov, avi, mkv, etc.)
-- **Image wallpaper** — static image as wallpaper (jpg, png, heic, webp, etc.)
+- **Image wallpaper** — static image (jpg, png, heic, webp, etc.)
 - **Wallpaper Engine support** — video, web, and scene types
-  - Metal rendering engine with GLSL-to-MSL shader translation
-  - Particle systems (snow, fog, smoke, dust, fireflies)
-  - Effect pipeline with FBO ping-pong (water ripple, water flow, shake, etc.)
-  - Multi-layer compositing with per-layer parallax and blend modes
-  - .tex texture decoder (ARGB8888, DXT1/3/5, LZ4, embedded JPEG/PNG)
-  - Audio playback with mute toggle
-  - Mouse interaction (parallax, cursor repulsion)
-- Per-screen wallpaper control
-- Pause, stop, and restore per screen or all at once
+- Per-screen wallpaper control with pause/stop/restore
 - Remembers state across launches
 - Dark menu bar enforced while wallpaper is active
+- Audio playback with mute toggle
 - Chinese / English UI
+
+## WE Scene Support
+
+| Feature | Status |
+|---------|--------|
+| **Layer** | |
+| Image layer | ✅ |
+| Multi-layer compositing | ✅ |
+| Fullscreen / Composition | ✅ |
+| Text layer | ❌ |
+| **Effect** | |
+| Shader effect pipeline (FBO ping-pong) | ✅ |
+| GLSL → Metal shader translation | ✅ |
+| Water Ripple / Water Flow | ✅ |
+| Shake / Water Waves | ✅ (via GLSL translation) |
+| Mouse parallax with delay | ✅ |
+| Per-layer parallax depth | ✅ |
+| Color blend modes | ✅ |
+| Blur / God Rays | ✅ (via GLSL translation) |
+| Global bloom | ✅ (basic) |
+| PBR light | ❌ |
+| **Camera** | |
+| Orthographic projection | ✅ |
+| ZoomFill / ZoomFit scaling | ✅ |
+| Shake | ❌ (parsed, not rendered) |
+| Fade / Path | ❌ |
+| **Audio** | |
+| Sound playback (loop) | ✅ |
+| Mute toggle | ✅ |
+| Audio visualization (spectrum) | ⚠️ (capture implemented, not wired to shaders) |
+| **Particle System** | |
+| Sprite renderer | ✅ |
+| Rope / trail renderer | ✅ |
+| Emitters (sphere, box) | ✅ |
+| Initializers (color, size, alpha, velocity, lifetime, rotation) | ✅ |
+| Operators (movement, drag, alpha fade, size change, oscillate) | ✅ |
+| Turbulence (Perlin noise) | ✅ |
+| Vortex | ✅ |
+| Control point (cursor repulsion) | ✅ |
+| Spritesheet animation | ⚠️ (parsed, basic) |
+| Children (sub-emitters) | ❌ |
+| Audio response | ❌ |
+| **Other** | |
+| .tex texture decoder (ARGB/DXT1/3/5/LZ4/JPEG/PNG) | ✅ |
+| PKG package parser (all versions) | ✅ |
+| Render dependency ordering | ✅ |
+| SceneScript (JS property evaluation) | ⚠️ (basic via JavaScriptCore) |
+| User properties | ❌ |
+| Puppet warp / bone animation | ❌ |
+| 3D model | ❌ |
+| Timeline animations | ❌ |
+
+✅ = Supported | ⚠️ = Partial | ❌ = Not supported
 
 ## Install
 
 ### Option 1: Download App (recommended)
 
-Download `VideoWallpaper-v2.0.0-app.zip` from [Releases](https://github.com/FishfishCai/VideoWallpaper/releases), unzip, and drag to Applications.
+Download from [Releases](https://github.com/FishfishCai/VideoWallpaper/releases), unzip, and drag to Applications.
 
 ```bash
 xattr -cr VideoWallpaper.app  # remove quarantine if needed
@@ -43,31 +89,29 @@ cp .build/release/VideoWallpaper ~/.local/bin/
 
 A **▶** icon appears in the menu bar:
 
-- **Select Wallpaper** — pick a video file, image file, or WE wallpaper folder
-- **Idle Wallpaper** — set fallback wallpaper per screen (default: solid black)
-- **Pause/Resume All** — toggle all screens
-- **Stop All / Resume All** — stop or restore all wallpapers
-- **Mute/Unmute Audio** — toggle scene wallpaper audio
-- **Language** — switch between English and Chinese
-- **Quit** (⌘Q)
+- **设置动态壁纸 / Dynamic Wallpaper** — select video, image, or WE wallpaper folder per screen
+- **设置退出状态壁纸 / Idle Wallpaper** — set fallback wallpaper per screen
+- **全部暂停 / 全部继续** — toggle pause (switches based on state)
+- **全部停止 / 全部恢复** — stop or restore (switches based on state)
+- **静音 / 取消静音** — toggle audio
+- **Language** — Chinese / English
 
-### Wallpaper Engine Support
+### Wallpaper Engine
 
-1. Copy the wallpaper folder (contains `project.json`) from your Windows machine
-2. Click **Select Wallpaper** and choose the folder
-3. Supported types: **Video**, **Web** (HTML/JS), **Scene** (Metal rendering)
+1. Copy wallpaper folder (contains `project.json`) from Windows
+2. Click **Select Wallpaper** → choose the folder
+3. Supported: **Video**, **Web** (HTML/JS), **Scene** (Metal rendering)
 
 ## Architecture
 
-- `SceneEngine.swift` — Metal renderer with multi-layer compositing, FBO ping-pong effects, particle systems
-- `TexDecoder.swift` — WE .tex binary texture decoder (ARGB8888, DXT1/3/5, LZ4 compression)
-- `GLSLTranslator.swift` — WE GLSL to Metal Shading Language runtime translator
-- `AudioCapture.swift` — Audio spectrum capture for shader uniforms
-- `SceneScript.swift` — JavaScriptCore-based property formula evaluation
-
-## Config
-
-State is saved to `~/.config/VideoWallpaper/` and restored on next launch.
+| File | Purpose |
+|------|---------|
+| `SceneEngine.swift` | Metal renderer: multi-layer compositing, FBO ping-pong, particles |
+| `TexDecoder.swift` | .tex binary texture decoder |
+| `GLSLTranslator.swift` | WE GLSL → Metal Shading Language translator |
+| `AudioCapture.swift` | Audio spectrum capture (FFT) |
+| `SceneScript.swift` | JavaScriptCore property evaluation |
+| `Config.swift` | Scene/PKG/JSON parsing, metadata generation |
 
 ## Requirements
 
