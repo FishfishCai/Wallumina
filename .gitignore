@@ -1,0 +1,6 @@
+.DS_Store
+.build/
+.swiftpm/
+videos/
+*.zip
+VideoWallpaper.app/Contents/MacOS/VideoWallpaper
