@@ -18,7 +18,15 @@ A lightweight macOS menu bar app that plays videos or Wallpaper Engine web wallp
 
 ### Option 1: Download App (recommended)
 
-Download `VideoWallpaper-vX.X.X-app.zip` from [Releases](https://github.com/FishfishCai/VideoWallpaper/releases), unzip, and drag `VideoWallpaper.app` to your Applications folder. Double-click to launch.
+Download `VideoWallpaper-vX.X.X-app.zip` from [Releases](https://github.com/FishfishCai/VideoWallpaper/releases), unzip, and drag `VideoWallpaper.app` to your Applications folder.
+
+Since the app is not code-signed, macOS may block it. Remove the quarantine attribute first:
+
+```bash
+xattr -cr VideoWallpaper.app
+```
+
+Then double-click to launch.
 
 ### Option 2: Download Binary
 
