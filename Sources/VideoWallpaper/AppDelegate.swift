@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wallpaperWindows: [String: NSWindow] = [:]
     private var players: [String: AVPlayer] = [:]
     private var webViews: [String: WKWebView] = [:]
+    private var sceneEngines: [String: SceneEngine] = [:]
     private var activeSources: [String: WallpaperSource] = [:]
     private var lastSources: [String: WallpaperSource] = [:]
     private var staticWallpapers: [String: URL] = [:]
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dynamicMenu: NSMenu!
     private var staticMenu: NSMenu!
     private var mouseMonitor: Any?
+    private var audioMuted = false
 
     // MARK: - Lifecycle
 
@@ -68,6 +70,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "(function(){var el=document.elementFromPoint(\(pt.x),\(y))||document;el.dispatchEvent(new MouseEvent('\(jsEvent)',{clientX:\(pt.x),clientY:\(y),bubbles:true}))})();",
                 completionHandler: nil
             )
+        }
+        // Pass mouse to scene engines
+        for (name, engine) in sceneEngines {
+            guard let window = wallpaperWindows[name] else { continue }
+            let pt = window.convertPoint(fromScreen: loc)
+            guard pt.x >= 0, pt.x <= window.frame.width, pt.y >= 0, pt.y <= window.frame.height else { continue }
+            engine.updateMouse(Float(pt.x / window.frame.width), Float(1 - pt.y / window.frame.height))
         }
     }
 
@@ -132,13 +141,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(staItem)
 
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: L.setVideoAll, action: #selector(selectVideoForAll), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: L.setWallpaperAll, action: #selector(selectWallpaperForAll), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L.setStaticAll, action: #selector(setStaticForAll), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: L.importWE, action: #selector(importWEForAll), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: L.pauseResumeAll, action: #selector(togglePauseAll), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L.stopAll, action: #selector(stopAll), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L.resumeAll, action: #selector(resumeAll), keyEquivalent: ""))
+        let muteItem = NSMenuItem(title: audioMuted ? L.unmuteAudio : L.muteAudio, action: #selector(toggleMute), keyEquivalent: "")
+        menu.addItem(muteItem)
         menu.addItem(NSMenuItem.separator())
 
         let langItem = NSMenuItem(title: L.language, action: nil, keyEquivalent: "")
@@ -174,13 +184,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sub.addItem(NSMenuItem.separator())
             }
 
-            let videoItem = NSMenuItem(title: L.selectVideo, action: #selector(selectVideoForScreen(_:)), keyEquivalent: "")
-            videoItem.tag = index
-            sub.addItem(videoItem)
-
-            let weItem = NSMenuItem(title: L.importWEFolder, action: #selector(importWEForScreen(_:)), keyEquivalent: "")
-            weItem.tag = index
-            sub.addItem(weItem)
+            let selectItem = NSMenuItem(title: L.selectWallpaper, action: #selector(selectWallpaperForScreen(_:)), keyEquivalent: "")
+            selectItem.tag = index
+            sub.addItem(selectItem)
 
             if activeSources[name] != nil {
                 sub.addItem(NSMenuItem.separator())
@@ -234,51 +240,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func setLangZh() { L.lang = .zh; saveLang(.zh); rebuildMenu() }
     @objc private func setLangEn() { L.lang = .en; saveLang(.en); rebuildMenu() }
 
-    // MARK: - Actions: Video
-
-    @objc private func selectVideoForScreen(_ sender: NSMenuItem) {
-        guard let url = pickFile(types: [.movie, .video, .mpeg4Movie, .quickTimeMovie, .avi], title: L.selectVideoTitle) else { return }
-        showWallpaper(screen: NSScreen.screens[sender.tag], source: WallpaperSource(type: .video, path: url.path))
+    @objc private func toggleMute() {
+        audioMuted.toggle()
+        for engine in sceneEngines.values {
+            engine.audioPlayer?.volume = audioMuted ? 0 : 0.5
+        }
+        rebuildMenu()
     }
 
-    @objc private func selectVideoForAll() {
-        guard let url = pickFile(types: [.movie, .video, .mpeg4Movie, .quickTimeMovie, .avi], title: L.selectVideoTitle) else { return }
-        let source = WallpaperSource(type: .video, path: url.path)
-        NSScreen.screens.forEach { showWallpaper(screen: $0, source: source) }
-    }
+    // MARK: - Actions: Select Wallpaper (unified)
 
-    // MARK: - Actions: WE Import
-
-    @objc private func importWEForScreen(_ sender: NSMenuItem) {
-        guard let result = pickWEFolder() else { return }
+    @objc private func selectWallpaperForScreen(_ sender: NSMenuItem) {
+        guard let source = pickWallpaper() else { return }
         let name = NSScreen.screens[sender.tag].localizedName
-        if let js = result.propertyJS { wePropertyJS[name] = js }
-        showWallpaper(screen: NSScreen.screens[sender.tag], source: result.source)
+        if let js = source.1 { wePropertyJS[name] = js }
+        showWallpaper(screen: NSScreen.screens[sender.tag], source: source.0)
     }
 
-    @objc private func importWEForAll() {
-        guard let result = pickWEFolder() else { return }
+    @objc private func selectWallpaperForAll() {
+        guard let source = pickWallpaper() else { return }
         for screen in NSScreen.screens {
-            if let js = result.propertyJS { wePropertyJS[screen.localizedName] = js }
-            showWallpaper(screen: screen, source: result.source)
+            if let js = source.1 { wePropertyJS[screen.localizedName] = js }
+            showWallpaper(screen: screen, source: source.0)
         }
     }
 
-    private func pickWEFolder() -> WEParseResult? {
+    /// Unified picker: files (video/image) + folders (WE wallpaper)
+    private func pickWallpaper() -> (WallpaperSource, String?)? {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.title = L.selectWETitle
+        panel.title = L.selectWallpaperTitle
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        guard let result = parseWEProject(at: url) else {
-            let alert = NSAlert()
-            alert.messageText = L.unsupportedWE
-            alert.informativeText = "Only 'video' and 'web' types are supported."
-            alert.runModal()
-            return nil
+
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+
+        if isDir.boolValue {
+            // Folder → WE wallpaper
+            guard let result = parseWEProject(at: url) else {
+                let alert = NSAlert()
+                alert.messageText = L.unsupportedWE
+                alert.informativeText = "Only 'video', 'web', and 'scene' types are supported."
+                alert.runModal()
+                return nil
+            }
+            return (result.source, result.propertyJS)
+        } else {
+            // File → detect type
+            let ext = url.pathExtension.lowercased()
+            let videoExts = Set(["mp4", "mov", "avi", "mkv", "m4v", "webm", "wmv", "flv", "mpg", "mpeg"])
+            let imageExts = Set(["jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "bmp", "webp", "gif"])
+
+            if videoExts.contains(ext) {
+                return (WallpaperSource(type: .video, path: url.path), nil)
+            } else if imageExts.contains(ext) {
+                return (WallpaperSource(type: .image, path: url.path, title: url.lastPathComponent), nil)
+            } else {
+                let alert = NSAlert()
+                alert.messageText = L.unsupportedFile
+                alert.runModal()
+                return nil
+            }
         }
-        return result
     }
 
     // MARK: - Actions: Pause / Stop / Restore
@@ -408,6 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         players[name]?.pause()
         players.removeValue(forKey: name)
         webViews.removeValue(forKey: name)
+        sceneEngines.removeValue(forKey: name)
         wallpaperWindows[name]?.orderOut(nil)
         wallpaperWindows.removeValue(forKey: name)
     }
@@ -428,6 +454,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 fileURL: URL(fileURLWithPath: source.path),
                 propertyJS: wePropertyJS[name]
             )
+        case .scene:
+            sceneEngines[name] = setupSceneContent(
+                window: window, screen: screen,
+                sceneDir: URL(fileURLWithPath: source.path)
+            )
+        case .image:
+            setupImageContent(window: window, screen: screen, path: source.path)
         }
 
         window.orderFront(nil)

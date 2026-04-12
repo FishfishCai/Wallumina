@@ -1,47 +1,36 @@
 # VideoWallpaper
 
-A lightweight macOS menu bar app that plays videos or Wallpaper Engine web wallpapers as your desktop wallpaper.
+A macOS menu bar app that plays videos, images, or Wallpaper Engine wallpapers as your desktop wallpaper. Features a Metal-based scene rendering engine for WE Scene wallpapers.
 
 ## Features
 
-- Loop video as desktop wallpaper
-- Import Wallpaper Engine wallpapers (video and web types)
-- Interactive web wallpapers with mouse event passthrough
-- Per-screen video and static wallpaper control
+- **Video wallpaper** — loop any video (mp4, mov, avi, mkv, etc.)
+- **Image wallpaper** — static image as wallpaper (jpg, png, heic, webp, etc.)
+- **Wallpaper Engine support** — video, web, and scene types
+  - Metal rendering engine with GLSL-to-MSL shader translation
+  - Particle systems (snow, fog, smoke, dust, fireflies)
+  - Effect pipeline with FBO ping-pong (water ripple, water flow, shake, etc.)
+  - Multi-layer compositing with per-layer parallax and blend modes
+  - .tex texture decoder (ARGB8888, DXT1/3/5, LZ4, embedded JPEG/PNG)
+  - Audio playback with mute toggle
+  - Mouse interaction (parallax, cursor repulsion)
+- Per-screen wallpaper control
 - Pause, stop, and restore per screen or all at once
 - Remembers state across launches
 - Dark menu bar enforced while wallpaper is active
-- Supports mp4, mov, avi, and other macOS-compatible video formats
 - Chinese / English UI
 
 ## Install
 
 ### Option 1: Download App (recommended)
 
-Download `VideoWallpaper-vX.X.X-app.zip` from [Releases](https://github.com/FishfishCai/VideoWallpaper/releases), unzip, and drag `VideoWallpaper.app` to your Applications folder.
-
-Since the app is not code-signed, macOS may block it. Remove the quarantine attribute first:
+Download `VideoWallpaper-v2.0.0-app.zip` from [Releases](https://github.com/FishfishCai/VideoWallpaper/releases), unzip, and drag to Applications.
 
 ```bash
-xattr -cr VideoWallpaper.app
+xattr -cr VideoWallpaper.app  # remove quarantine if needed
 ```
 
-Then double-click to launch.
-
-### Option 2: Download Binary
-
-Download `VideoWallpaper-vX.X.X-binary.zip` from [Releases](https://github.com/FishfishCai/VideoWallpaper/releases), unzip, and move to your PATH:
-
-```bash
-cp VideoWallpaper ~/.local/bin/
-# or: sudo cp VideoWallpaper /usr/local/bin/
-```
-
-Launch with `nohup VideoWallpaper &`.
-
-### Option 3: Build from Source
-
-Requires Xcode Command Line Tools (includes Swift).
+### Option 2: Build from Source
 
 ```bash
 git clone https://github.com/FishfishCai/VideoWallpaper.git
@@ -54,33 +43,27 @@ cp .build/release/VideoWallpaper ~/.local/bin/
 
 A **▶** icon appears in the menu bar:
 
-- **Screen Wallpaper** — select video or import WE wallpaper per screen, pause/stop/restore individually
+- **Select Wallpaper** — pick a video file, image file, or WE wallpaper folder
 - **Idle Wallpaper** — set fallback wallpaper per screen (default: solid black)
-- **Set Video for All** — same video on all screens
-- **Set Idle Wallpaper for All** — same static wallpaper on all screens
-- **Import Wallpaper Engine** — import a WE wallpaper folder for all screens
 - **Pause/Resume All** — toggle all screens
 - **Stop All / Resume All** — stop or restore all wallpapers
+- **Mute/Unmute Audio** — toggle scene wallpaper audio
 - **Language** — switch between English and Chinese
 - **Quit** (⌘Q)
 
 ### Wallpaper Engine Support
 
-Import wallpapers from [Wallpaper Engine](https://store.steampowered.com/app/431960/Wallpaper_Engine/) (Steam Workshop):
-
 1. Copy the wallpaper folder (contains `project.json`) from your Windows machine
-2. Use **Import Wallpaper Engine** in the menu
-3. Select the folder containing `project.json`
+2. Click **Select Wallpaper** and choose the folder
+3. Supported types: **Video**, **Web** (HTML/JS), **Scene** (Metal rendering)
 
-Supported types:
-- **Video** — plays the video file directly
-- **Web** — loads HTML wallpapers in WKWebView with property injection and mouse interaction
+## Architecture
 
-To launch at login: System Settings → General → Login Items → add VideoWallpaper.
-
-## How It Works
-
-Places a borderless window below the desktop icon layer using `AVPlayer` for video or `WKWebView` for web wallpapers. Sets the system wallpaper to solid black while active to ensure a dark menu bar. Web wallpapers receive mouse events via global event monitoring and JavaScript injection.
+- `SceneEngine.swift` — Metal renderer with multi-layer compositing, FBO ping-pong effects, particle systems
+- `TexDecoder.swift` — WE .tex binary texture decoder (ARGB8888, DXT1/3/5, LZ4 compression)
+- `GLSLTranslator.swift` — WE GLSL to Metal Shading Language runtime translator
+- `AudioCapture.swift` — Audio spectrum capture for shader uniforms
+- `SceneScript.swift` — JavaScriptCore-based property formula evaluation
 
 ## Config
 
