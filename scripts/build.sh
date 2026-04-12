@@ -16,6 +16,9 @@ sed -i '' "s/<string>[0-9]*\.[0-9]*\.[0-9]*<\/string>/<string>${VERSION}<\/strin
 # Copy binary into .app
 cp .build/release/VideoWallpaper VideoWallpaper.app/Contents/MacOS/
 
+# Ad-hoc code sign (free, no Apple Developer account needed)
+codesign --force --deep --sign - VideoWallpaper.app
+
 # Also copy standalone binary
 cp .build/release/VideoWallpaper .
 
