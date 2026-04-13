@@ -3,9 +3,16 @@ import Foundation
 /// Translates Wallpaper Engine GLSL effect shaders to Metal Shading Language
 struct GLSLTranslator {
 
+    struct TranslationResult {
+        let msl: String
+        let uniformNames: [String] // ordered list of uniform names after the fixed header
+        let samplerCount: Int
+    }
+
     /// Translate a WE fragment shader to MSL
-    static func translateFragment(source: String, name: String, includes: [String: String] = [:]) -> String {
+    static func translateFragment(source: String, name: String, includes: [String: String] = [:]) -> TranslationResult {
         var src = resolveIncludes(source, includes: includes)
+        src = src.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         src = stripComments(src)
 
         // Parse declarations
@@ -34,25 +41,36 @@ struct GLSLTranslator {
         // Build MSL
         var msl = "#include <metal_stdlib>\nusing namespace metal;\n\n"
 
-        // Fragment input struct (from varyings)
+        // Fragment input matches effectVertex output (position + uv)
         msl += "struct Frag_\(name)_In {\n"
         msl += "    float4 position [[position]];\n"
-        for v in varyings {
-            msl += "    \(glslTypeToMSL(v.type)) \(v.name);\n"
-        }
+        msl += "    float2 uv;\n"
         msl += "};\n\n"
 
-        // Uniforms buffer struct
+        // Standardized uniform buffer — same layout for ALL effect shaders
+        // Must match the buffer built in SceneEngine.applyLayerEffects
         msl += "struct Frag_\(name)_Uniforms {\n"
         msl += "    float g_Time;\n"
         msl += "    float g_Daytime;\n"
         msl += "    float2 g_PointerPosition;\n"
-        msl += "    float2 g_TexelSize;\n"
-        msl += "    float2 g_TexelSizeHalf;\n"
-        for u in valueUniforms {
-            if ["g_Time", "g_Daytime"].contains(u.name) { continue }
-            msl += "    \(glslTypeToMSL(u.type)) \(u.name);\n"
-        }
+        msl += "    float4 g_Texture0Resolution;\n"
+        msl += "    float4 g_Texture1Resolution;\n"
+        msl += "    float4 g_Texture2Resolution;\n"
+        // ALL possible effect uniforms in fixed order (matches SceneEngine buffer)
+        msl += "    float g_AnimationSpeed;\n"
+        msl += "    float g_Strength;\n"
+        msl += "    float g_Scale;\n"
+        msl += "    float g_Ratio;\n"
+        msl += "    float g_ScrollSpeed;\n"
+        msl += "    float g_Direction;\n"
+        msl += "    float g_FlowSpeed;\n"
+        msl += "    float g_FlowAmp;\n"
+        msl += "    float g_FlowPhaseScale;\n"
+        msl += "    float g_SpecularPower;\n"
+        msl += "    float g_SpecularStrength;\n"
+        msl += "    float g_SpecularColorR;\n"
+        msl += "    float g_SpecularColorG;\n"
+        msl += "    float g_SpecularColorB;\n"
         msl += "};\n\n"
 
         // Extract main() body
@@ -67,27 +85,60 @@ struct GLSLTranslator {
         }
         msl += "    sampler s [[sampler(0)]])\n{\n"
 
-        // Declare locals from varyings
+        // Initialize varyings from in.uv (vertex shader UV computation done here instead)
         for v in varyings {
-            msl += "    \(glslTypeToMSL(v.type)) \(v.name) = in.\(v.name);\n"
+            if v.name == "v_TexCoord" {
+                // v_TexCoord.xy = framebuffer UV, .zw = mask UV (adjusted by g_Texture1Resolution)
+                msl += "    float4 v_TexCoord = float4(in.uv, in.uv);\n"
+                msl += "    if (u.g_Texture1Resolution.x > 0.0) {\n"
+                msl += "        v_TexCoord.z = in.uv.x * u.g_Texture1Resolution.z / u.g_Texture1Resolution.x;\n"
+                msl += "        v_TexCoord.w = in.uv.y * u.g_Texture1Resolution.w / u.g_Texture1Resolution.y;\n"
+                msl += "    }\n"
+            } else if v.name == "v_TexCoordRipple" {
+                // Ripple UVs computed from vertex shader logic — inline it here
+                msl += "    float4 v_TexCoordRipple = float4(0);\n"
+                msl += "    {\n"
+                msl += "        float animSp = u.g_AnimationSpeed * u.g_AnimationSpeed;\n"
+                msl += "        float2 coordsR = in.uv;\n"
+                msl += "        float2 coordsR2 = in.uv * 1.333;\n"
+                msl += "        float2 scroll = float2(sin(u.g_Direction), -cos(u.g_Direction)) * u.g_ScrollSpeed * u.g_ScrollSpeed * u.g_Time;\n"
+                msl += "        v_TexCoordRipple.xy = (coordsR + u.g_Time * animSp + scroll) * u.g_Scale;\n"
+                msl += "        v_TexCoordRipple.zw = (coordsR2 - u.g_Time * animSp + scroll) * u.g_Scale;\n"
+                msl += "        float asp = u.g_Texture0Resolution.x / u.g_Texture0Resolution.y;\n"
+                msl += "        v_TexCoordRipple.xz *= asp;\n"
+                msl += "        v_TexCoordRipple.yw *= u.g_Ratio;\n"
+                msl += "    }\n"
+            } else {
+                msl += "    \(glslTypeToMSL(v.type)) \(v.name) = \(glslTypeToMSL(v.type))(0);\n"
+            }
         }
-        // Declare uniform access shortcuts
+        // Declare ALL uniforms as locals from the standardized struct
         msl += "    float g_Time = u.g_Time;\n"
-        for u2 in valueUniforms {
-            if u2.name == "g_Time" { continue }
-            msl += "    \(glslTypeToMSL(u2.type)) \(u2.name) = u.\(u2.name);\n"
-        }
+        msl += "    float g_AnimationSpeed = u.g_AnimationSpeed;\n"
+        msl += "    float g_Strength = u.g_Strength;\n"
+        msl += "    float g_Scale = u.g_Scale;\n"
+        msl += "    float g_Ratio = u.g_Ratio;\n"
+        msl += "    float g_ScrollSpeed = u.g_ScrollSpeed;\n"
+        msl += "    float g_Direction = u.g_Direction;\n"
+        msl += "    float g_FlowSpeed = u.g_FlowSpeed;\n"
+        msl += "    float g_FlowAmp = u.g_FlowAmp;\n"
+        msl += "    float g_FlowPhaseScale = u.g_FlowPhaseScale;\n"
+        msl += "    float g_SpecularPower = u.g_SpecularPower;\n"
+        msl += "    float g_SpecularStrength = u.g_SpecularStrength;\n"
+        msl += "    float3 g_SpecularColor = float3(u.g_SpecularColorR, u.g_SpecularColorG, u.g_SpecularColorB);\n"
         msl += "    float4 _fragColor = float4(0);\n"
         msl += mainBody
         msl += "    return _fragColor;\n"
         msl += "}\n"
 
-        return msl
+        let uniformNames = valueUniforms.filter { !["g_Time", "g_Daytime"].contains($0.name) }.map(\.name)
+        return TranslationResult(msl: msl, uniformNames: uniformNames, samplerCount: samplerUniforms.count)
     }
 
     /// Translate a WE vertex shader to MSL (effect pass — fullscreen quad)
     static func translateVertex(source: String, name: String, includes: [String: String] = [:]) -> String {
         var src = resolveIncludes(source, includes: includes)
+        src = src.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         src = stripComments(src)
 
         let varyings = parseDeclarations(src, keyword: "varying")
@@ -253,6 +304,17 @@ struct GLSLTranslator {
         // Function replacements
         s = s.replacingOccurrences(of: "dFdx(", with: "dfdx(")
         s = s.replacingOccurrences(of: "dFdy(", with: "dfdy(")
+        // Fix integer literal ambiguity in max/min calls
+        if let intLitRegex = try? NSRegularExpression(pattern: #"(max|min)\((\d+),"#) {
+            let range = NSRange(s.startIndex..., in: s)
+            s = intLitRegex.stringByReplacingMatches(in: s, range: range,
+                                                      withTemplate: "$1(float($2),")
+        }
+        if let intLitRegex2 = try? NSRegularExpression(pattern: #",\s*(\d+)\)"#) {
+            let range = NSRange(s.startIndex..., in: s)
+            s = intLitRegex2.stringByReplacingMatches(in: s, range: range,
+                                                       withTemplate: ", float($1))")
+        }
         // mul(a, b) → ((b) * (a)) — WE reverses matrix multiply order
         // Handle nested parens by finding balanced match
         while let mulRange = s.range(of: "mul(") {
@@ -275,14 +337,14 @@ struct GLSLTranslator {
     private static func replaceTextureSampling(_ src: String, samplerName: String) -> String {
         var s = src
         // texSample2D(g_TextureN, uv) → g_TextureN.sample(s, uv)
-        let pattern = "texSample2D(\\s*\(samplerName)\\s*,"
+        let pattern = "texSample2D\\(\\s*\(samplerName)\\s*,"
         if let regex = try? NSRegularExpression(pattern: pattern) {
             let range = NSRange(s.startIndex..., in: s)
             s = regex.stringByReplacingMatches(in: s, range: range,
                                                 withTemplate: "\(samplerName).sample(s,")
         }
         // texSample2DLod(g_TextureN, uv, lod) → g_TextureN.sample(s, uv, level(lod))
-        let lodPattern = "texSample2DLod(\\s*\(samplerName)\\s*,"
+        let lodPattern = "texSample2DLod\\(\\s*\(samplerName)\\s*,"
         if let regex = try? NSRegularExpression(pattern: lodPattern) {
             let range = NSRange(s.startIndex..., in: s)
             s = regex.stringByReplacingMatches(in: s, range: range,

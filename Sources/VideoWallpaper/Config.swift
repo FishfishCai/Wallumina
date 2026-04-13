@@ -296,6 +296,7 @@ struct WEEffect: Decodable {
     let file: String?
     let name: String?
     let passes: [WEEffectPass]?
+    let visible: WEFlexBool?
     // inline constant values
     let animationspeed: Double?
     let speed: Double?
@@ -310,6 +311,7 @@ struct WEEffect: Decodable {
 struct WEEffectPass: Decodable {
     let material: String?
     let constantshadervalues: [String: WEFlexDouble]?
+    let textures: [String?]?  // per-index texture paths (null = framebuffer/default)
 }
 
 struct WEInstanceOverride: Decodable {
@@ -706,6 +708,7 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
     var effectConfigs: [EffectConfig] = []
     for obj in orderedObjects {
       for effect in obj.effects ?? [] {
+        guard effect.visible?.value ?? true else { continue }
         let effectFile = effect.file ?? ""
         let shaderName: String
         if effectFile.hasSuffix("/effect.json") {
@@ -720,49 +723,106 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         let vertSrc = allFiles[vertKey].flatMap { String(data: $0, encoding: .utf8) }
         let fragSrc = allFiles[fragKey].flatMap { String(data: $0, encoding: .utf8) }
 
-        // Collect params using raw material key names (lowercase)
-        // Priority: pass constantshadervalues > effect-level fields
+        // Collect params: effect-level fields first, then constantshadervalues override
         var params: [String: Float] = [:]
-        // Effect-level fields (lowest priority)
-        if let v = effect.animationspeed { params["animationspeed"] = Float(v) }
-        if let v = effect.speed { params["speed"] = Float(v) }
-        if let v = effect.strength { params["strength"] = Float(v) }
-        if let v = effect.ripplestrength { params["ripplestrength"] = Float(v) }
-        if let v = effect.scale { params["scale"] = Float(v) }
-        if let v = effect.ratio { params["ratio"] = Float(v) }
-        if let v = effect.scrollspeed { params["scrollspeed"] = Float(v) }
-        if let v = effect.scrolldirection { params["scrolldirection"] = Float(v) }
-        // Pass constantshadervalues override (highest priority, this is where WE stores them)
+        if let v = effect.animationspeed { params["g_AnimationSpeed"] = Float(v) }
+        if let v = effect.speed { params["g_FlowSpeed"] = Float(v) }
+        if let v = effect.strength { params["g_Strength"] = Float(v); params["g_FlowAmp"] = Float(v) }
+        if let v = effect.ripplestrength { params["g_Strength"] = Float(v) }
+        if let v = effect.scale { params["g_Scale"] = Float(v) }
+        if let v = effect.ratio { params["g_Ratio"] = Float(v) }
+        if let v = effect.scrollspeed { params["g_ScrollSpeed"] = Float(v) }
+        if let v = effect.scrolldirection { params["g_Direction"] = Float(v) }
+        // Override from pass constantshadervalues (where WE actually stores per-effect values)
+        // Map material keys to uniform names via the shader annotation mapping
+        let csvKeyMap: [String: String] = [
+            "animationspeed": "g_AnimationSpeed", "speed": "g_FlowSpeed",
+            "strength": "g_FlowAmp", "ripplestrength": "g_Strength",
+            "scale": "g_Scale", "ratio": "g_Ratio",
+            "scrollspeed": "g_ScrollSpeed", "scrolldirection": "g_Direction",
+            "phasescale": "g_FlowPhaseScale",
+            "ripplespecularpower": "g_SpecularPower", "ripplespecularstrength": "g_SpecularStrength",
+        ]
+        // Set WE shader defaults for uniforms that might not appear in CSV
+        let shaderDefaults: [String: Float] = [
+            "g_AnimationSpeed": 0.15, "g_Strength": 0.1,
+            "g_FlowSpeed": 1.0, "g_FlowAmp": 1.0, "g_FlowPhaseScale": 1.0,
+            "g_Scale": 1.0, "g_Ratio": 1.0, "g_ScrollSpeed": 0.0, "g_Direction": 0.0,
+            "g_SpecularPower": 1.0, "g_SpecularStrength": 1.0,
+        ]
+        for (k, v) in shaderDefaults { params[k] = v } // set defaults first
         for pass in effect.passes ?? [] {
             for (key, val) in pass.constantshadervalues ?? [:] {
-                params[key] = Float(val.value)
+                // Try direct mapping
+                if let uniformName = csvKeyMap[key] {
+                    params[uniformName] = Float(val.value)
+                }
+                // Also try stripping ui_editor_properties_ prefix
+                let stripped = key.replacingOccurrences(of: "ui_editor_properties_", with: "")
+                    .replacingOccurrences(of: "_", with: "")
+                if let uniformName = csvKeyMap[stripped] {
+                    params[uniformName] = Float(val.value)
+                }
             }
         }
 
-        // Extract textures
+        // Extract textures from per-pass texture array in scene.json
+        // Format: [null, "masks/waterflow_mask_xxx", "effects/waterflowphase"]
+        // Index 0 = framebuffer (null), 1 = mask/flow map, 2 = normal/phase map
         var maskPath: String?
         var extraPaths: [String] = []
-        let baseName = URL(string: shaderName)?.lastPathComponent ?? shaderName
 
-        for key in allFiles.keys.sorted() where key.contains("masks/\(baseName)_mask_") && key.hasSuffix(".tex") {
-            if let texData = allFiles[key], let tex = decodeTex(from: texData) {
-                let saveName = "tex_\(effectConfigs.count)_mask.png"
-                let savePath = sceneDir.appendingPathComponent(saveName)
-                if texToImageFile(tex, destination: savePath) {
-                    maskPath = maskPath ?? savePath.path
+        // Use texture paths from the first pass (most effects have one pass)
+        let passTextures = (effect.passes ?? []).first?.textures ?? []
+        for (texIdx, texRef) in passTextures.enumerated() {
+            guard let ref = texRef, texIdx > 0 else { continue } // skip index 0 (framebuffer)
+
+            // Try to find the texture in PKG with .tex suffix
+            let texKey = ref.hasSuffix(".tex") ? ref : "\(ref).tex"
+            // Also try materials/ prefix if not already present
+            let candidates = [texKey, "materials/\(texKey)"]
+            var decoded = false
+            for candidate in candidates {
+                if let texData = allFiles[candidate], let tex = decodeTex(from: texData) {
+                    let saveName = "tex_\(effectConfigs.count)_\(texIdx).png"
+                    let savePath = sceneDir.appendingPathComponent(saveName)
+                    if texToImageFile(tex, destination: savePath) {
+                        if texIdx == 1 { maskPath = savePath.path }
+                        else { extraPaths.append(savePath.path) }
+                        decoded = true
+                        break
+                    }
+                }
+            }
+            if !decoded {
+                fputs("[VW-CFG] Missing texture: \(ref) for effect \(shaderName)\n", stderr)
+            }
+        }
+
+        // Fallback: pattern match from PKG if pass textures were empty
+        if passTextures.isEmpty || passTextures.allSatisfy({ $0 == nil }) {
+            let baseName = URL(string: shaderName)?.lastPathComponent ?? shaderName
+            for key in allFiles.keys.sorted() where key.contains("masks/\(baseName)_mask_") && key.hasSuffix(".tex") {
+                if let texData = allFiles[key], let tex = decodeTex(from: texData) {
+                    let saveName = "tex_\(effectConfigs.count)_mask.png"
+                    let savePath = sceneDir.appendingPathComponent(saveName)
+                    if texToImageFile(tex, destination: savePath) {
+                        maskPath = maskPath ?? savePath.path
+                    }
+                }
+            }
+            for key in allFiles.keys.sorted() where key.hasPrefix("materials/effects/\(baseName)") && key.hasSuffix(".tex") {
+                if let texData = allFiles[key], let tex = decodeTex(from: texData) {
+                    let safeName = key.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".tex", with: ".png")
+                    let savePath = sceneDir.appendingPathComponent(safeName)
+                    if texToImageFile(tex, destination: savePath) {
+                        extraPaths.append(savePath.path)
+                    }
                 }
             }
         }
-        for key in allFiles.keys.sorted() where key.hasPrefix("materials/effects/\(baseName)") && key.hasSuffix(".tex") {
-            if let texData = allFiles[key], let tex = decodeTex(from: texData) {
-                let safeName = key.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".tex", with: ".png")
-                let savePath = sceneDir.appendingPathComponent(safeName)
-                if texToImageFile(tex, destination: savePath) {
-                    extraPaths.append(savePath.path)
-                }
-            }
-        }
 
+        fputs("[VW-CFG] Effect \(shaderName): mask=\(maskPath != nil), extras=\(extraPaths.count), params=\(params.filter { $0.key.hasPrefix("g_") }.mapValues { String(format: "%.3f", $0) })\n", stderr)
         effectConfigs.append(EffectConfig(
             type: shaderName, params: params,
             maskTexturePath: maskPath, extraTexturePaths: extraPaths,
@@ -776,6 +836,7 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
 
     // Build per-layer configs
     var layerConfigs: [LayerConfig] = []
+    var effectIdx = 0
     for obj in orderedObjects where obj.image != nil {
         let o = parseVec(obj.origin)
         let s = parseVec(obj.size)
@@ -785,19 +846,12 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         // Find this layer's texture path (already decoded above)
         let texPath = bgDecoded ? bgImagePath.path : nil
 
-        // Collect effects for this layer
+        // Match effects by index from effectConfigs (built in same order)
         var layerEffects: [EffectConfig] = []
-        for effect in obj.effects ?? [] {
-            // Match effect to our effectConfigs by type
-            let effectFile = effect.file ?? ""
-            let shaderName: String
-            if effectFile.hasSuffix("/effect.json") {
-                shaderName = String(effectFile.dropLast("/effect.json".count))
-            } else {
-                shaderName = effectFile.replacingOccurrences(of: ".json", with: "")
-            }
-            if let matching = effectConfigs.first(where: { $0.type == shaderName }) {
-                layerEffects.append(matching)
+        for _ in obj.effects ?? [] {
+            if effectIdx < effectConfigs.count {
+                layerEffects.append(effectConfigs[effectIdx])
+                effectIdx += 1
             }
         }
 

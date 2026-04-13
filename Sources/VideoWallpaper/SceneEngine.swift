@@ -139,19 +139,7 @@ final class SceneEngine: NSObject, MTKViewDelegate {
         guard let csamp = device.makeSamplerState(descriptor: cDesc) else { return nil }
         self.clampSampler = csamp
 
-        // Built-in effect pipelines
-        if let effectVert = library.makeFunction(name: "effectVertex") {
-            for (fragName, key) in [("waterRippleFragment", "effects/waterripple"),
-                                     ("waterFlowFragment", "effects/waterflow")] {
-                if let fragFn = library.makeFunction(name: fragName) {
-                    let desc = MTLRenderPipelineDescriptor()
-                    desc.vertexFunction = effectVert
-                    desc.fragmentFunction = fragFn
-                    desc.colorAttachments[0].pixelFormat = .bgra8Unorm
-                    effectPipelines[key] = try? device.makeRenderPipelineState(descriptor: desc)
-                }
-            }
-        }
+        // No hardcoded effect pipelines — all effects use GLSL→MSL translated shaders from the PKG
 
         // Bloom pipeline
         if let bloomFrag = library.makeFunction(name: "bloomFragment"),
@@ -175,7 +163,7 @@ final class SceneEngine: NSObject, MTKViewDelegate {
     func makeTexture(from cgImage: CGImage) -> MTLTexture? {
         let w = cgImage.width, h = cgImage.height
         let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+            pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
         desc.usage = .shaderRead
         guard let texture = device.makeTexture(descriptor: desc) else { return nil }
         let bytesPerRow = w * 4
@@ -183,7 +171,7 @@ final class SceneEngine: NSObject, MTKViewDelegate {
         let ctx = CGContext(data: &pixels, width: w, height: h,
                             bitsPerComponent: 8, bytesPerRow: bytesPerRow,
                             space: CGColorSpaceCreateDeviceRGB(),
-                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         ctx?.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         texture.replace(region: MTLRegionMake2D(0, 0, w, h),
                         mipmapLevel: 0, withBytes: pixels, bytesPerRow: bytesPerRow)
@@ -199,7 +187,7 @@ final class SceneEngine: NSObject, MTKViewDelegate {
 
     private lazy var fallbackTexture: MTLTexture? = {
         let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: 1, height: 1, mipmapped: false)
+            pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
         desc.usage = .shaderRead
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
         var white: [UInt8] = [255, 255, 255, 255]
@@ -214,25 +202,30 @@ final class SceneEngine: NSObject, MTKViewDelegate {
 
     // MARK: - Dynamic Shader Compilation
 
-    /// Only compile dynamic shaders for effects without a hardcoded pipeline
+    /// Stores the uniform layout for each compiled effect shader
+    var effectUniformLayouts: [String: [String]] = [:] // effect name → ordered uniform names
+
     func compileEffect(name: String, vertexSource: String?, fragmentSource: String?,
                         includes: [String: String] = [:]) {
-        // Skip if hardcoded pipeline exists (hardcoded ones use EffectUniforms correctly)
         guard effectPipelines[name] == nil, let fragSrc = fragmentSource else { return }
         let safeName = name.replacingOccurrences(of: "/", with: "_")
-        let mslFrag = GLSLTranslator.translateFragment(source: fragSrc, name: safeName, includes: includes)
-        let mslVert = vertexSource.map { GLSLTranslator.translateVertex(source: $0, name: safeName, includes: includes) } ?? ""
-        let combined = mslVert + "\n" + mslFrag
+        let result = GLSLTranslator.translateFragment(source: fragSrc, name: safeName, includes: includes)
+        // Always use hardcoded effectVertex — vertex UV computations are moved to fragment
+        let baseLib = try? device.makeLibrary(source: SceneEngine.metalShaderSource, options: nil)
         do {
-            let lib = try device.makeLibrary(source: combined, options: nil)
-            let baseLib = try? device.makeLibrary(source: SceneEngine.metalShaderSource, options: nil)
-            let vertFn = lib.makeFunction(name: "vert_\(safeName)") ?? baseLib?.makeFunction(name: "effectVertex")
+            let lib = try device.makeLibrary(source: result.msl, options: nil)
+            let vertFn = baseLib?.makeFunction(name: "effectVertex")
             let fragFn = lib.makeFunction(name: "frag_\(safeName)")
-            guard let vf = vertFn, let ff = fragFn else { return }
+            guard let vf = vertFn, let ff = fragFn else {
+                fputs("[VW-SHADER] \(name): missing functions\n", stderr)
+                return
+            }
             let desc = MTLRenderPipelineDescriptor()
             desc.vertexFunction = vf; desc.fragmentFunction = ff
             desc.colorAttachments[0].pixelFormat = .bgra8Unorm
             effectPipelines[name] = try device.makeRenderPipelineState(descriptor: desc)
+            effectUniformLayouts[name] = result.uniformNames
+            fputs("[VW-SHADER] Compiled \(name)\n", stderr)
         } catch {
             fputs("[VW-SHADER] \(name): \(error)\n", stderr)
         }
@@ -405,17 +398,34 @@ final class SceneEngine: NSObject, MTKViewDelegate {
             pass.colorAttachments[0].storeAction = .store
             guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { continue }
             enc.setRenderPipelineState(pipeline)
-            var params = EffectUniforms(
-                time: totalTime,
-                strength: effect.params["ripplestrength"] ?? effect.params["strength"] ?? 0.05,
-                speed: effect.params["animationspeed"] ?? effect.params["speed"] ?? 0.15,
-                scale: effect.params["scale"] ?? 3.0,
-                ratio: effect.params["ratio"] ?? 1.0,
-                scrollSpeed: effect.params["scrollspeed"] ?? 0.0,
-                scrollDirection: effect.params["scrolldirection"] ?? 0.0,
-                texWidth: Float(tw), texHeight: Float(th)
-            )
-            enc.setFragmentBytes(&params, length: MemoryLayout<EffectUniforms>.size, index: 0)
+
+            // Build standardized uniform buffer matching ALL translated shader structs
+            let t1 = safeTexture(effect.maskKey)
+            let t2 = safeTexture(effect.normalOrPhaseKey)
+            var uniformData: [Float] = [
+                totalTime,                                              // g_Time
+                0,                                                       // g_Daytime
+                smoothX, smoothY,                                        // g_PointerPosition
+                Float(input.width), Float(input.height),                // g_Texture0Resolution
+                Float(input.width), Float(input.height),
+                Float(t1.width), Float(t1.height),                      // g_Texture1Resolution
+                Float(t1.width), Float(t1.height),
+                Float(t2.width), Float(t2.height),                      // g_Texture2Resolution
+                Float(t2.width), Float(t2.height),
+                effect.params["g_AnimationSpeed"] ?? 0.15,              // g_AnimationSpeed
+                effect.params["g_Strength"] ?? 0.1,                     // g_Strength
+                effect.params["g_Scale"] ?? 1.0,                        // g_Scale
+                effect.params["g_Ratio"] ?? 1.0,                        // g_Ratio
+                effect.params["g_ScrollSpeed"] ?? 0.0,                  // g_ScrollSpeed
+                effect.params["g_Direction"] ?? 0.0,                    // g_Direction
+                effect.params["g_FlowSpeed"] ?? 1.0,                    // g_FlowSpeed
+                effect.params["g_FlowAmp"] ?? 1.0,                      // g_FlowAmp
+                effect.params["g_FlowPhaseScale"] ?? 1.0,               // g_FlowPhaseScale
+                effect.params["g_SpecularPower"] ?? 1.0,                // g_SpecularPower
+                effect.params["g_SpecularStrength"] ?? 1.0,             // g_SpecularStrength
+                0, 0, 0,                                                 // g_SpecularColor (float3, padded)
+            ]
+            enc.setFragmentBytes(&uniformData, length: uniformData.count * 4, index: 0)
             enc.setFragmentTexture(input, index: 0)
             enc.setFragmentTexture(safeTexture(effect.maskKey), index: 1)
             enc.setFragmentTexture(safeTexture(effect.normalOrPhaseKey), index: 2)
