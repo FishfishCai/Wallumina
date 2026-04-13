@@ -1,8 +1,8 @@
 #!/bin/bash
 # Dual-variant build:
-#   ./scripts/build.sh 3.0.0            -> stable (no scene)
-#   ./scripts/build.sh 3.0.0-beta.1     -> beta (scene enabled, auto-detected)
-#   ./scripts/build.sh 3.0.0 beta       -> force beta regardless of version
+#   ./scripts/build.sh 1.0.0            -> stable (no scene)
+#   ./scripts/build.sh 1.0.0-beta.1     -> beta (scene enabled, auto-detected)
+#   ./scripts/build.sh 1.0.0 beta       -> force beta regardless of version
 set -e
 
 cd "$(dirname "$0")/.."
@@ -40,11 +40,17 @@ sed -i '' "s/<string>[0-9][^<]*<\/string>/<string>${VERSION}<\/string>/" \
 # Copy binary into .app
 cp .build/release/VideoWallpaper VideoWallpaper.app/Contents/MacOS/
 
-# Strip extended attributes (xattr leftovers break codesign)
-xattr -cr VideoWallpaper.app
-
-# Ad-hoc code sign
-codesign --force --deep --sign - VideoWallpaper.app
+# Sign via /tmp — iCloud fileprovider re-adds com.apple.FinderInfo right after
+# xattr -cr if the .app is inside a synced folder, which breaks codesign.
+SIGN_DIR="/tmp/VW-sign-$$"
+rm -rf "$SIGN_DIR"
+mkdir -p "$SIGN_DIR"
+cp -R VideoWallpaper.app "$SIGN_DIR/"
+xattr -cr "$SIGN_DIR/VideoWallpaper.app"
+codesign --force --deep --sign - "$SIGN_DIR/VideoWallpaper.app"
+rm -rf VideoWallpaper.app
+cp -R "$SIGN_DIR/VideoWallpaper.app" .
+rm -rf "$SIGN_DIR"
 
 # Standalone binary
 cp .build/release/VideoWallpaper .
