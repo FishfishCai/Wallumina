@@ -162,7 +162,7 @@ func decodeTex(from rawData: Data) -> TexImage? {
 
     // Only decode the largest mipmap (first one in most formats, or find largest)
     var mipmaps: [TexMipmap] = []
-    for i in 0..<mipmapCount {
+    for _ in 0..<mipmapCount {
         if texbVersion >= 4 {
             _ = reader.readUInt32()
             _ = reader.readUInt32()

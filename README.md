@@ -1,70 +1,18 @@
 # VideoWallpaper
 
-A macOS menu bar app that plays videos, images, or Wallpaper Engine wallpapers as your desktop wallpaper. Features a Metal-based scene rendering engine.
+A macOS menu bar app that plays videos, images, or Wallpaper Engine wallpapers as your desktop wallpaper.
 
 ## Features
 
-- **Video wallpaper** — loop any video (mp4, mov, avi, mkv, etc.)
-- **Image wallpaper** — static image (jpg, png, heic, webp, etc.)
-- **Wallpaper Engine support** — video, web, and scene types
-- Per-screen wallpaper control with pause/stop/restore
-- Remembers state across launches
+- **Video wallpaper** — loop any video (mp4, mov, mkv, webm, avi, m4v, wmv, flv, mpg, mpeg)
+- **Image wallpaper** — static image (jpg, png, heic, webp, tiff, bmp, gif)
+- **Wallpaper Engine support** — video and web (HTML/JS) types
+- Per-screen wallpaper control with pause / stop / restore
+- Remembers state across launches (including WE web user properties)
 - Dark menu bar enforced while wallpaper is active
 - Audio playback with mute toggle
+- Mouse events forwarded into WE web wallpapers for interactive content
 - Chinese / English UI
-
-## WE Scene Support
-
-| Feature | Status |
-|---------|--------|
-| **Layer** | |
-| Image layer | ✅ |
-| Multi-layer compositing | ✅ |
-| Fullscreen / Composition | ✅ |
-| Text layer | ❌ |
-| **Effect** | |
-| Shader effect pipeline (FBO ping-pong) | ✅ |
-| GLSL → Metal shader translation | ✅ |
-| Water Ripple / Water Flow | ✅ |
-| Shake / Water Waves | ✅ (via GLSL translation) |
-| Mouse parallax with delay | ✅ |
-| Per-layer parallax depth | ✅ |
-| Color blend modes | ✅ |
-| Blur / God Rays | ✅ (via GLSL translation) |
-| Global bloom | ✅ (basic) |
-| PBR light | ❌ |
-| **Camera** | |
-| Orthographic projection | ✅ |
-| ZoomFill / ZoomFit scaling | ✅ |
-| Shake | ❌ (parsed, not rendered) |
-| Fade / Path | ❌ |
-| **Audio** | |
-| Sound playback (loop) | ✅ |
-| Mute toggle | ✅ |
-| Audio visualization (spectrum) | ⚠️ (capture implemented, not wired to shaders) |
-| **Particle System** | |
-| Sprite renderer | ✅ |
-| Rope / trail renderer | ✅ |
-| Emitters (sphere, box) | ✅ |
-| Initializers (color, size, alpha, velocity, lifetime, rotation) | ✅ |
-| Operators (movement, drag, alpha fade, size change, oscillate) | ✅ |
-| Turbulence (Perlin noise) | ✅ |
-| Vortex | ✅ |
-| Control point (cursor repulsion) | ✅ |
-| Spritesheet animation | ⚠️ (parsed, basic) |
-| Children (sub-emitters) | ❌ |
-| Audio response | ❌ |
-| **Other** | |
-| .tex texture decoder (ARGB/DXT1/3/5/LZ4/JPEG/PNG) | ✅ |
-| PKG package parser (all versions) | ✅ |
-| Render dependency ordering | ✅ |
-| SceneScript (JS property evaluation) | ⚠️ (basic via JavaScriptCore) |
-| User properties | ❌ |
-| Puppet warp / bone animation | ❌ |
-| 3D model | ❌ |
-| Timeline animations | ❌ |
-
-✅ = Supported | ⚠️ = Partial | ❌ = Not supported
 
 ## Install
 
@@ -85,6 +33,12 @@ swift build -c release
 cp .build/release/VideoWallpaper ~/.local/bin/
 ```
 
+Or build the full `.app` bundle:
+
+```bash
+./scripts/build.sh 1.0.0
+```
+
 ## Usage
 
 A **▶** icon appears in the menu bar:
@@ -98,20 +52,22 @@ A **▶** icon appears in the menu bar:
 
 ### Wallpaper Engine
 
-1. Copy wallpaper folder (contains `project.json`) from Windows
+1. Copy a wallpaper folder (containing `project.json`) from Windows
 2. Click **Select Wallpaper** → choose the folder
-3. Supported: **Video**, **Web** (HTML/JS), **Scene** (Metal rendering)
+3. Supported WE types: **Video**, **Web** (HTML/JS with user-property injection and mouse forwarding)
 
 ## Architecture
 
-| File | Purpose |
-|------|---------|
-| `SceneEngine.swift` | Metal renderer: multi-layer compositing, FBO ping-pong, particles |
-| `TexDecoder.swift` | .tex binary texture decoder |
-| `GLSLTranslator.swift` | WE GLSL → Metal Shading Language translator |
-| `AudioCapture.swift` | Audio spectrum capture (FFT) |
-| `SceneScript.swift` | JavaScriptCore property evaluation |
-| `Config.swift` | Scene/PKG/JSON parsing, metadata generation |
+Source is organized into four layers under `Sources/VideoWallpaper/`:
+
+| Folder | Purpose |
+|--------|---------|
+| `App/` | `AppDelegate` (menu bar UI + lifecycle) and `WallpaperController` (per-screen state + backend orchestration) |
+| `Config/` | `AppConfig` (state.json persistence) and `WEProject` (Wallpaper Engine `project.json` parsing) |
+| `Backends/` | One file per wallpaper type: video / image / web, plus the borderless desktop-level window factory |
+| `Scene/` | Metal renderer for Wallpaper Engine **scene** type — only compiled into the beta build via `-DENABLE_SCENE` |
+
+Stable builds ship without any scene-renderer code linked in.
 
 ## Requirements
 

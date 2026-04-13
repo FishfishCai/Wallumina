@@ -37,6 +37,9 @@ struct ScreenConfig: Codable {
     var wallpaperSource: WallpaperSource?
     var paused: Bool
     var staticWallpaperPath: String?
+    /// Wallpaper Engine user-property JS object literal for web wallpapers.
+    /// Optional so old state.json files still decode.
+    var webPropertyJS: String?
 }
 
 @MainActor

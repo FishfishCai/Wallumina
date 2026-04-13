@@ -1,5 +1,7 @@
 #if ENABLE_SCENE
 import Foundation
+import CoreGraphics
+import AppKit
 
 // MARK: - PKG extractor
 
@@ -234,27 +236,27 @@ enum WENumOrString: Decodable {
     }
 }
 
-// MARK: - Generated metadata (consumed by SceneEngine)
+// MARK: - In-memory scene bundle (consumed by SceneBackend)
 
-struct SceneMetadata: Codable {
+/// Everything SceneBackend needs to build a SceneEngine. No disk paths.
+struct SceneBundle {
     let sceneWidth: Int
     let sceneHeight: Int
-    let backgroundPath: String?
     let parallax: Bool
     let parallaxAmount: Double
     let parallaxDelay: Double
+    let bloomEnabled: Bool
+    let bloomStrength: Double
+    let bloomThreshold: Double
+    let layers: [SceneLayerBundle]
     let particles: [ParticleConfig]
-    let effects: [EffectConfig]       // flat list (legacy, used when layers is nil)
-    let layers: [LayerConfig]?        // per-layer config with effects
-    let bloomEnabled: Bool?
-    let bloomStrength: Double?
-    let bloomThreshold: Double?
-    let soundPath: String?
+    /// Audio URL (only place we still touch disk — AVPlayer needs a URL). nil if no audio.
+    let soundURL: URL?
 }
 
-struct LayerConfig: Codable {
+struct SceneLayerBundle {
     let id: Int
-    let texturePath: String?
+    let texture: CGImage?
     let originX: Float, originY: Float
     let sizeW: Float, sizeH: Float
     let scaleX: Float, scaleY: Float
@@ -262,19 +264,19 @@ struct LayerConfig: Codable {
     let parallaxX: Float, parallaxY: Float
     let colorBlendMode: Int
     let visible: Bool
-    let effects: [EffectConfig]
+    let effects: [SceneEffectBundle]
 }
 
-struct EffectConfig: Codable {
+struct SceneEffectBundle {
     let type: String
     let params: [String: Float]
-    let maskTexturePath: String?
-    let extraTexturePaths: [String]
+    let maskImage: CGImage?
+    let extraImages: [CGImage]
     let vertexShaderSource: String?
     let fragmentShaderSource: String?
 }
 
-struct ParticleConfig: Codable {
+struct ParticleConfig {
     var ox: Float, oy: Float
     var emitterOffsetX: Float, emitterOffsetY: Float
     var spawnW: Float, spawnH: Float
@@ -441,30 +443,45 @@ func buildParticleConfig(obj: WESceneObject, particle: WEParticle, isAdditive: B
     )
 }
 
-// MARK: - Scene entry point (called from parseWEProject)
+// MARK: - Scene bundle loader (in-memory, zero disk writes except audio)
 
-func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEParseResult? {
+/// Extract audio bytes to a per-process temp URL. AVPlayer needs a URL; Data isn't enough.
+/// Filename is content-hashed so two scenes with the same basename ("music.mp3") don't collide.
+private func writeAudioToTemp(name: String, data: Data) -> URL? {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("VideoWallpaper/audio", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let hash = String(data.hashValue, radix: 16).replacingOccurrences(of: "-", with: "n")
+    let ext = (name as NSString).pathExtension
+    let base = (name as NSString).deletingPathExtension
+    let filename = ext.isEmpty ? "\(base)_\(hash)" : "\(base)_\(hash).\(ext)"
+    let url = dir.appendingPathComponent(filename)
+    if FileManager.default.fileExists(atPath: url.path) { return url }
+    do { try data.write(to: url); return url } catch { return nil }
+}
+
+/// Parse a Wallpaper Engine scene folder entirely in memory.
+/// Only disk write: audio extracted from scene.pkg (AVPlayer requires a URL).
+func loadSceneBundle(folderURL: URL) -> SceneBundle? {
     let pkgFile = folderURL.appendingPathComponent("scene.pkg")
-    let sceneDir = configDir.appendingPathComponent("scene_cache/\(folderURL.lastPathComponent)")
-    try? FileManager.default.removeItem(at: sceneDir)
-    try? FileManager.default.createDirectory(at: sceneDir, withIntermediateDirectories: true)
+    let usingPkg = FileManager.default.fileExists(atPath: pkgFile.path)
+
+    let allFiles: [String: Data] = usingPkg ? (extractPKG(at: pkgFile) ?? [:]) : [:]
 
     let sceneData: Data?
     var particleFiles: [String: Data] = [:]
     var materialFiles: [String: Data] = [:]
 
-    if FileManager.default.fileExists(atPath: pkgFile.path) {
-        guard let files = extractPKG(at: pkgFile) else { return nil }
-        sceneData = files["scene.json"]
-        for (name, data) in files where name.hasPrefix("particles/") {
+    if usingPkg {
+        sceneData = allFiles["scene.json"]
+        for (name, data) in allFiles where name.hasPrefix("particles/") {
             particleFiles[name] = data
         }
-        for (name, data) in files where name.hasPrefix("materials/") && name.hasSuffix(".json") {
+        for (name, data) in allFiles where name.hasPrefix("materials/") && name.hasSuffix(".json") {
             materialFiles[name] = data
         }
     } else {
-        let sceneFile = folderURL.appendingPathComponent("scene.json")
-        sceneData = try? Data(contentsOf: sceneFile)
+        sceneData = try? Data(contentsOf: folderURL.appendingPathComponent("scene.json"))
         if let s = decodeWEScene(from: sceneData ?? Data()) {
             for obj in s.objects ?? [] {
                 if let pPath = obj.particle {
@@ -475,175 +492,57 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         }
     }
 
-    guard let sceneData,
-          let scene = decodeWEScene(from: sceneData) else { return nil }
+    guard let sceneData, let scene = decodeWEScene(from: sceneData) else { return nil }
 
     let orderedObjects = topologicalSort(scene.objects ?? [])
 
+    // Particles: pair each WESceneObject with its decoded WEParticle + blend mode
     var particles: [(WESceneObject, WEParticle, Bool)] = []
-    var waterEffects: [WEEffect] = []
-
     for obj in orderedObjects {
-        if let pPath = obj.particle, let pData = particleFiles[pPath] {
-            if let p = try? JSONDecoder().decode(WEParticle.self, from: pData) {
-                var isAdditive = false
-                if let matPath = p.material, let matData = materialFiles[matPath] {
-                    if let matStr = String(data: matData, encoding: .utf8) {
-                        isAdditive = matStr.contains("\"additive\"")
-                    }
-                }
-                particles.append((obj, p, isAdditive))
-            }
+        guard let pPath = obj.particle, let pData = particleFiles[pPath] else { continue }
+        guard let p = try? JSONDecoder().decode(WEParticle.self, from: pData) else { continue }
+        var isAdditive = false
+        if let matPath = p.material, let matData = materialFiles[matPath],
+           let matStr = String(data: matData, encoding: .utf8) {
+            isAdditive = matStr.contains("\"additive\"")
         }
-        for effect in obj.effects ?? [] {
-            let name = (effect.file ?? effect.name ?? "").lowercased()
-            if name.contains("waterripple") || name.contains("waterflow") {
-                waterEffects.append(effect)
-            }
-        }
+        particles.append((obj, p, isAdditive))
     }
 
-    let allFiles: [String: Data]
-    if FileManager.default.fileExists(atPath: pkgFile.path) {
-        allFiles = extractPKG(at: pkgFile) ?? [:]
-    } else {
-        allFiles = [:]
-    }
-
-    let bgImagePath = sceneDir.appendingPathComponent("background.png")
-    var bgDecoded = false
+    // Decode background .tex (or fall back to preview.jpg) to a CGImage in memory
+    var bgImage: CGImage? = nil
     for obj in orderedObjects where obj.image != nil {
         let modelName = URL(fileURLWithPath: obj.image ?? "").deletingPathExtension().lastPathComponent
-        if let texData = allFiles["materials/\(modelName).tex"] ?? allFiles["materials/\(modelName).texR"] {
-            if let tex = decodeTex(from: texData) {
-                bgDecoded = texToImageFile(tex, destination: bgImagePath)
-            }
+        if let texData = allFiles["materials/\(modelName).tex"] ?? allFiles["materials/\(modelName).texR"],
+           let tex = decodeTex(from: texData),
+           let img = texToCGImage(tex) {
+            bgImage = img
+            break
         }
     }
-    if !bgDecoded {
+    if bgImage == nil {
         let previewSrc = folderURL.appendingPathComponent("preview.jpg")
-        if FileManager.default.fileExists(atPath: previewSrc.path) {
-            try? FileManager.default.copyItem(at: previewSrc, to: bgImagePath)
-            bgDecoded = true
+        if FileManager.default.fileExists(atPath: previewSrc.path),
+           let ns = NSImage(contentsOf: previewSrc) {
+            bgImage = ns.cgImage(forProposedRect: nil, context: nil, hints: nil)
         }
     }
 
-    var effectConfigs: [EffectConfig] = []
+    // Flat list of effect bundles, built in iteration order so we can match them
+    // to their parent layer below.
+    var effectBundles: [SceneEffectBundle] = []
     for obj in orderedObjects {
-      for effect in obj.effects ?? [] {
-        guard effect.visible?.value ?? true else { continue }
-        let effectFile = effect.file ?? ""
-        let shaderName: String
-        if effectFile.hasSuffix("/effect.json") {
-            shaderName = String(effectFile.dropLast("/effect.json".count))
-        } else {
-            shaderName = effectFile.replacingOccurrences(of: ".json", with: "")
+        for effect in obj.effects ?? [] {
+            guard effect.visible?.value ?? true else { continue }
+            effectBundles.append(buildEffectBundle(effect: effect, allFiles: allFiles))
         }
-
-        let vertKey = "shaders/\(shaderName).vert"
-        let fragKey = "shaders/\(shaderName).frag"
-        let vertSrc = allFiles[vertKey].flatMap { String(data: $0, encoding: .utf8) }
-        let fragSrc = allFiles[fragKey].flatMap { String(data: $0, encoding: .utf8) }
-
-        var params: [String: Float] = [:]
-        if let v = effect.animationspeed { params["g_AnimationSpeed"] = Float(v) }
-        if let v = effect.speed { params["g_FlowSpeed"] = Float(v) }
-        if let v = effect.strength { params["g_Strength"] = Float(v); params["g_FlowAmp"] = Float(v) }
-        if let v = effect.ripplestrength { params["g_Strength"] = Float(v) }
-        if let v = effect.scale { params["g_Scale"] = Float(v) }
-        if let v = effect.ratio { params["g_Ratio"] = Float(v) }
-        if let v = effect.scrollspeed { params["g_ScrollSpeed"] = Float(v) }
-        if let v = effect.scrolldirection { params["g_Direction"] = Float(v) }
-        let csvKeyMap: [String: String] = [
-            "animationspeed": "g_AnimationSpeed", "speed": "g_FlowSpeed",
-            "strength": "g_FlowAmp", "ripplestrength": "g_Strength",
-            "scale": "g_Scale", "ratio": "g_Ratio",
-            "scrollspeed": "g_ScrollSpeed", "scrolldirection": "g_Direction",
-            "phasescale": "g_FlowPhaseScale",
-            "ripplespecularpower": "g_SpecularPower", "ripplespecularstrength": "g_SpecularStrength",
-        ]
-        let shaderDefaults: [String: Float] = [
-            "g_AnimationSpeed": 0.15, "g_Strength": 0.1,
-            "g_FlowSpeed": 1.0, "g_FlowAmp": 1.0, "g_FlowPhaseScale": 1.0,
-            "g_Scale": 1.0, "g_Ratio": 1.0, "g_ScrollSpeed": 0.0, "g_Direction": 0.0,
-            "g_SpecularPower": 1.0, "g_SpecularStrength": 1.0,
-        ]
-        for (k, v) in shaderDefaults { params[k] = v }
-        for pass in effect.passes ?? [] {
-            for (key, val) in pass.constantshadervalues ?? [:] {
-                if let uniformName = csvKeyMap[key] {
-                    params[uniformName] = Float(val.value)
-                }
-                let stripped = key.replacingOccurrences(of: "ui_editor_properties_", with: "")
-                    .replacingOccurrences(of: "_", with: "")
-                if let uniformName = csvKeyMap[stripped] {
-                    params[uniformName] = Float(val.value)
-                }
-            }
-        }
-
-        var maskPath: String?
-        var extraPaths: [String] = []
-
-        let passTextures = (effect.passes ?? []).first?.textures ?? []
-        for (texIdx, texRef) in passTextures.enumerated() {
-            guard let ref = texRef, texIdx > 0 else { continue }
-
-            let texKey = ref.hasSuffix(".tex") ? ref : "\(ref).tex"
-            let candidates = [texKey, "materials/\(texKey)"]
-            var decoded = false
-            for candidate in candidates {
-                if let texData = allFiles[candidate], let tex = decodeTex(from: texData) {
-                    let saveName = "tex_\(effectConfigs.count)_\(texIdx).png"
-                    let savePath = sceneDir.appendingPathComponent(saveName)
-                    if texToImageFile(tex, destination: savePath) {
-                        if texIdx == 1 { maskPath = savePath.path }
-                        else { extraPaths.append(savePath.path) }
-                        decoded = true
-                        break
-                    }
-                }
-            }
-            if !decoded {
-                fputs("[VW-CFG] Missing texture: \(ref) for effect \(shaderName)\n", stderr)
-            }
-        }
-
-        if passTextures.isEmpty || passTextures.allSatisfy({ $0 == nil }) {
-            let baseName = URL(string: shaderName)?.lastPathComponent ?? shaderName
-            for key in allFiles.keys.sorted() where key.contains("masks/\(baseName)_mask_") && key.hasSuffix(".tex") {
-                if let texData = allFiles[key], let tex = decodeTex(from: texData) {
-                    let saveName = "tex_\(effectConfigs.count)_mask.png"
-                    let savePath = sceneDir.appendingPathComponent(saveName)
-                    if texToImageFile(tex, destination: savePath) {
-                        maskPath = maskPath ?? savePath.path
-                    }
-                }
-            }
-            for key in allFiles.keys.sorted() where key.hasPrefix("materials/effects/\(baseName)") && key.hasSuffix(".tex") {
-                if let texData = allFiles[key], let tex = decodeTex(from: texData) {
-                    let safeName = key.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ".tex", with: ".png")
-                    let savePath = sceneDir.appendingPathComponent(safeName)
-                    if texToImageFile(tex, destination: savePath) {
-                        extraPaths.append(savePath.path)
-                    }
-                }
-            }
-        }
-
-        fputs("[VW-CFG] Effect \(shaderName): mask=\(maskPath != nil), extras=\(extraPaths.count), params=\(params.filter { $0.key.hasPrefix("g_") }.mapValues { String(format: "%.3f", $0) })\n", stderr)
-        effectConfigs.append(EffectConfig(
-            type: shaderName, params: params,
-            maskTexturePath: maskPath, extraTexturePaths: extraPaths,
-            vertexShaderSource: vertSrc, fragmentShaderSource: fragSrc
-        ))
-      }
     }
 
     let sceneW = scene.general?.orthogonalprojection?.width ?? 1920
     let sceneH = scene.general?.orthogonalprojection?.height ?? 1080
 
-    var layerConfigs: [LayerConfig] = []
+    // Build per-layer bundles, consuming effectBundles in the same iteration order
+    var layerBundles: [SceneLayerBundle] = []
     var effectIdx = 0
     for obj in orderedObjects where obj.image != nil {
         let o = parseVec(obj.origin)
@@ -651,18 +550,17 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         let sc = parseVec(obj.scale)
         let pd = parseVec(obj.parallaxDepth)
 
-        let texPath = bgDecoded ? bgImagePath.path : nil
-
-        var layerEffects: [EffectConfig] = []
-        for _ in obj.effects ?? [] {
-            if effectIdx < effectConfigs.count {
-                layerEffects.append(effectConfigs[effectIdx])
+        var layerEffects: [SceneEffectBundle] = []
+        for effect in obj.effects ?? [] where effect.visible?.value ?? true {
+            if effectIdx < effectBundles.count {
+                layerEffects.append(effectBundles[effectIdx])
                 effectIdx += 1
             }
         }
 
-        layerConfigs.append(LayerConfig(
-            id: obj.id ?? 0, texturePath: texPath,
+        layerBundles.append(SceneLayerBundle(
+            id: obj.id ?? 0,
+            texture: bgImage,
             originX: Float(o.count > 0 ? o[0] : 0), originY: Float(o.count > 1 ? o[1] : 0),
             sizeW: Float(s.count > 0 ? s[0] : Double(sceneW)), sizeH: Float(s.count > 1 ? s[1] : Double(sceneH)),
             scaleX: Float(sc.count > 0 ? sc[0] : 1), scaleY: Float(sc.count > 1 ? sc[1] : 1),
@@ -674,45 +572,132 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         ))
     }
 
-    var soundPath: String?
-    for key in allFiles.keys where key.hasSuffix(".mp3") || key.hasSuffix(".ogg") || key.hasSuffix(".flac") || key.hasSuffix(".wav") {
-        let savePath = sceneDir.appendingPathComponent(URL(fileURLWithPath: key).lastPathComponent)
-        try? allFiles[key]?.write(to: savePath)
-        soundPath = savePath.path
+    // Audio: either extract from pkg to temp, or use a loose file next to the folder
+    var soundURL: URL? = nil
+    for (name, data) in allFiles where
+        name.hasSuffix(".mp3") || name.hasSuffix(".ogg") ||
+        name.hasSuffix(".flac") || name.hasSuffix(".wav") {
+        soundURL = writeAudioToTemp(name: URL(fileURLWithPath: name).lastPathComponent, data: data)
     }
-    if soundPath == nil {
+    if soundURL == nil {
         for ext in ["mp3", "ogg", "flac", "wav"] {
             let files = try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)
             if let f = files?.first(where: { $0.pathExtension.lowercased() == ext }) {
-                soundPath = f.path
+                soundURL = f
                 break
             }
         }
     }
 
-    let sceneMetadata = SceneMetadata(
+    return SceneBundle(
         sceneWidth: sceneW, sceneHeight: sceneH,
-        backgroundPath: bgDecoded ? bgImagePath.path : nil,
         parallax: scene.general?.cameraparallax ?? false,
         parallaxAmount: scene.general?.cameraparallaxamount ?? 0.5,
         parallaxDelay: scene.general?.cameraparallaxdelay ?? 0.1,
+        bloomEnabled: scene.general?.bloom ?? false,
+        bloomStrength: scene.general?.bloomstrength ?? 1.0,
+        bloomThreshold: scene.general?.bloomthreshold ?? 0.5,
+        layers: layerBundles,
         particles: particles.map { buildParticleConfig(obj: $0.0, particle: $0.1, isAdditive: $0.2,
                                                         sceneW: Float(sceneW), sceneH: Float(sceneH)) },
-        effects: effectConfigs,
-        layers: layerConfigs.isEmpty ? nil : layerConfigs,
-        bloomEnabled: scene.general?.bloom,
-        bloomStrength: scene.general?.bloomstrength,
-        bloomThreshold: scene.general?.bloomthreshold,
-        soundPath: soundPath
+        soundURL: soundURL
     )
-    let metadataFile = sceneDir.appendingPathComponent("metadata.json")
-    if let encoded = try? JSONEncoder().encode(sceneMetadata) {
-        try? encoded.write(to: metadataFile)
+}
+
+/// Build one SceneEffectBundle: shader sources + params + mask/extra CGImages (all in memory).
+private func buildEffectBundle(effect: WEEffect, allFiles: [String: Data]) -> SceneEffectBundle {
+    let effectFile = effect.file ?? ""
+    let shaderName: String
+    if effectFile.hasSuffix("/effect.json") {
+        shaderName = String(effectFile.dropLast("/effect.json".count))
+    } else {
+        shaderName = effectFile.replacingOccurrences(of: ".json", with: "")
     }
 
-    return WEParseResult(
-        source: WallpaperSource(type: .scene, path: sceneDir.path, title: title),
-        title: title, propertyJS: nil
+    // Shader sources
+    let vertKey = "shaders/\(shaderName).vert"
+    let fragKey = "shaders/\(shaderName).frag"
+    let vertSrc = allFiles[vertKey].flatMap { String(data: $0, encoding: .utf8) }
+    let fragSrc = allFiles[fragKey].flatMap { String(data: $0, encoding: .utf8) }
+
+    // Uniform params: shader defaults + inline effect fields + per-pass constantshadervalues
+    var params: [String: Float] = [
+        "g_AnimationSpeed": 0.15, "g_Strength": 0.1,
+        "g_FlowSpeed": 1.0, "g_FlowAmp": 1.0, "g_FlowPhaseScale": 1.0,
+        "g_Scale": 1.0, "g_Ratio": 1.0, "g_ScrollSpeed": 0.0, "g_Direction": 0.0,
+        "g_SpecularPower": 1.0, "g_SpecularStrength": 1.0,
+    ]
+    if let v = effect.animationspeed { params["g_AnimationSpeed"] = Float(v) }
+    if let v = effect.speed { params["g_FlowSpeed"] = Float(v) }
+    if let v = effect.strength { params["g_Strength"] = Float(v); params["g_FlowAmp"] = Float(v) }
+    if let v = effect.ripplestrength { params["g_Strength"] = Float(v) }
+    if let v = effect.scale { params["g_Scale"] = Float(v) }
+    if let v = effect.ratio { params["g_Ratio"] = Float(v) }
+    if let v = effect.scrollspeed { params["g_ScrollSpeed"] = Float(v) }
+    if let v = effect.scrolldirection { params["g_Direction"] = Float(v) }
+
+    let csvKeyMap: [String: String] = [
+        "animationspeed": "g_AnimationSpeed", "speed": "g_FlowSpeed",
+        "strength": "g_FlowAmp", "ripplestrength": "g_Strength",
+        "scale": "g_Scale", "ratio": "g_Ratio",
+        "scrollspeed": "g_ScrollSpeed", "scrolldirection": "g_Direction",
+        "phasescale": "g_FlowPhaseScale",
+        "ripplespecularpower": "g_SpecularPower", "ripplespecularstrength": "g_SpecularStrength",
+    ]
+    for pass in effect.passes ?? [] {
+        for (key, val) in pass.constantshadervalues ?? [:] {
+            if let uniformName = csvKeyMap[key] {
+                params[uniformName] = Float(val.value)
+            }
+            let stripped = key.replacingOccurrences(of: "ui_editor_properties_", with: "")
+                .replacingOccurrences(of: "_", with: "")
+            if let uniformName = csvKeyMap[stripped] {
+                params[uniformName] = Float(val.value)
+            }
+        }
+    }
+
+    // Textures: decode straight to CGImage. Index 0 = framebuffer (skip), 1 = mask, 2+ = extras.
+    var maskImage: CGImage? = nil
+    var extraImages: [CGImage] = []
+
+    let passTextures = (effect.passes ?? []).first?.textures ?? []
+    for (texIdx, texRef) in passTextures.enumerated() {
+        guard let ref = texRef, texIdx > 0 else { continue }
+        let texKey = ref.hasSuffix(".tex") ? ref : "\(ref).tex"
+        let candidates = [texKey, "materials/\(texKey)"]
+        for candidate in candidates {
+            guard let texData = allFiles[candidate],
+                  let tex = decodeTex(from: texData),
+                  let img = texToCGImage(tex) else { continue }
+            if texIdx == 1 { maskImage = img } else { extraImages.append(img) }
+            break
+        }
+    }
+
+    // Fallback: pattern-match textures from PKG if pass.textures was empty/null
+    if passTextures.isEmpty || passTextures.allSatisfy({ $0 == nil }) {
+        let baseName = URL(string: shaderName)?.lastPathComponent ?? shaderName
+        for key in allFiles.keys.sorted() where
+            key.contains("masks/\(baseName)_mask_") && key.hasSuffix(".tex") {
+            if let texData = allFiles[key], let tex = decodeTex(from: texData),
+               let img = texToCGImage(tex) {
+                if maskImage == nil { maskImage = img }
+            }
+        }
+        for key in allFiles.keys.sorted() where
+            key.hasPrefix("materials/effects/\(baseName)") && key.hasSuffix(".tex") {
+            if let texData = allFiles[key], let tex = decodeTex(from: texData),
+               let img = texToCGImage(tex) {
+                extraImages.append(img)
+            }
+        }
+    }
+
+    return SceneEffectBundle(
+        type: shaderName, params: params,
+        maskImage: maskImage, extraImages: extraImages,
+        vertexShaderSource: vertSrc, fragmentShaderSource: fragSrc
     )
 }
 

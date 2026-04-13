@@ -249,7 +249,7 @@ struct GLSLTranslator {
     }
 
     private static func resolveIncludes(_ src: String, includes: [String: String]) -> String {
-        var result = src
+        let result = src
         // Simple #include "filename" resolution
         let lines = result.split(separator: "\n", omittingEmptySubsequences: false)
         var output: [String] = []
@@ -375,7 +375,7 @@ struct GLSLTranslator {
         guard let braceStart = afterMain.firstIndex(of: "{") else { return "" }
 
         var depth = 0
-        var bodyStart = src.index(after: braceStart)
+        let bodyStart = src.index(after: braceStart)
         var bodyEnd = bodyStart
         for i in src[braceStart...].indices {
             if src[i] == "{" { depth += 1 }

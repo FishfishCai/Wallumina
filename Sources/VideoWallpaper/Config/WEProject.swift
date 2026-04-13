@@ -82,7 +82,11 @@ func parseWEProject(at folderURL: URL) -> WEParseResult? {
                              title: title, propertyJS: propsJSON)
     case "scene":
         #if ENABLE_SCENE
-        return parseWEScene(at: folderURL, project: project, title: title)
+        // Validate once — parsing is cheap now that it's all in-memory.
+        // SceneBackend re-parses from source.path (the original folder) when showing.
+        guard loadSceneBundle(folderURL: folderURL) != nil else { return nil }
+        return WEParseResult(source: WallpaperSource(type: .scene, path: folderURL.path, title: title),
+                             title: title, propertyJS: nil)
         #else
         return nil
         #endif

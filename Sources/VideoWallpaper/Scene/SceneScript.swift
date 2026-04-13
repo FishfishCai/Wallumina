@@ -9,9 +9,9 @@ final class SceneScriptEngine {
 
     init() {
         context = JSContext()!
-        // Add console.log
+        // Proxy JS console.{log,warn,error} into os.Logger
         let log: @convention(block) (String) -> Void = { msg in
-            fputs("[VW-SCRIPT] \(msg)\n", stderr)
+            SceneLog.script.debug("\(msg, privacy: .public)")
         }
         context.setObject(log, forKeyedSubscript: "log" as NSString)
         context.evaluateScript("var console = { log: log, warn: log, error: log };")

@@ -48,7 +48,7 @@ final class AudioCapture {
         do {
             try engine.start()
         } catch {
-            fputs("[VW-AUDIO] capture start failed: \(error)\n", stderr)
+            SceneLog.audio.error("capture start failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
