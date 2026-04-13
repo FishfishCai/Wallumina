@@ -1,3 +1,4 @@
+#if ENABLE_SCENE
 import Foundation
 import JavaScriptCore
 
@@ -46,3 +47,5 @@ final class SceneScriptEngine {
         return context.evaluateScript(wrappedScript)?.toDouble()
     }
 }
+
+#endif

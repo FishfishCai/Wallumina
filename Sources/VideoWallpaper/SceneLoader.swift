@@ -1,178 +1,7 @@
+#if ENABLE_SCENE
 import Foundation
-import AppKit
 
-// MARK: - Types
-
-enum WallpaperType: String, Codable {
-    case video
-    case web
-    case scene
-    case image
-}
-
-struct WallpaperSource: Codable {
-    var type: WallpaperType
-    var path: String
-    var title: String?
-
-    var displayName: String {
-        if let title, !title.isEmpty { return title }
-        return URL(fileURLWithPath: path).lastPathComponent
-    }
-}
-
-// MARK: - Config
-
-let configDir = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".config/VideoWallpaper")
-let configFile = configDir.appendingPathComponent("state.json")
-let langFile = configDir.appendingPathComponent("lang.json")
-let blackImageURL = configDir.appendingPathComponent("black.png")
-
-struct AppConfig: Codable {
-    var screens: [String: ScreenConfig]
-}
-
-struct ScreenConfig: Codable {
-    var wallpaperSource: WallpaperSource?
-    var paused: Bool
-    var staticWallpaperPath: String?
-}
-
-@MainActor
-func loadConfig() -> AppConfig {
-    guard let data = try? Data(contentsOf: configFile),
-          let config = try? JSONDecoder().decode(AppConfig.self, from: data)
-    else { return AppConfig(screens: [:]) }
-    return config
-}
-
-@MainActor
-func saveConfig(_ config: AppConfig) {
-    try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-    if let data = try? JSONEncoder().encode(config) {
-        try? data.write(to: configFile)
-    }
-}
-
-@MainActor
-func loadLang() -> Lang {
-    guard let data = try? Data(contentsOf: langFile),
-          let lang = try? JSONDecoder().decode(Lang.self, from: data)
-    else { return .en }
-    return lang
-}
-
-@MainActor
-func saveLang(_ lang: Lang) {
-    try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-    if let data = try? JSONEncoder().encode(lang) {
-        try? data.write(to: langFile)
-    }
-}
-
-@MainActor
-func ensureBlackImage() {
-    try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-    if FileManager.default.fileExists(atPath: blackImageURL.path) { return }
-    let image = NSImage(size: NSSize(width: 2, height: 2))
-    image.lockFocus()
-    NSColor.black.setFill()
-    NSRect(x: 0, y: 0, width: 2, height: 2).fill()
-    image.unlockFocus()
-    if let tiff = image.tiffRepresentation,
-       let bitmap = NSBitmapImageRep(data: tiff),
-       let png = bitmap.representation(using: .png, properties: [:]) {
-        try? png.write(to: blackImageURL)
-    }
-}
-
-// MARK: - Wallpaper Engine
-
-struct WEProject: Decodable {
-    let type: String?
-    let file: String?
-    let title: String?
-    let general: WEGeneral?
-}
-
-struct WEGeneral: Decodable {
-    let properties: [String: WEProperty]?
-}
-
-struct WEProperty: Decodable {
-    let type: String?
-    let value: WEValue?
-}
-
-enum WEValue: Decodable {
-    case string(String)
-    case int(Int)
-    case double(Double)
-    case bool(Bool)
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.singleValueContainer()
-        if let v = try? c.decode(Bool.self) { self = .bool(v) }
-        else if let v = try? c.decode(Int.self) { self = .int(v) }
-        else if let v = try? c.decode(Double.self) { self = .double(v) }
-        else if let v = try? c.decode(String.self) { self = .string(v) }
-        else { self = .string("") }
-    }
-
-    var jsValue: String {
-        switch self {
-        case .string(let s): return "\"\(s)\""
-        case .int(let i): return "\(i)"
-        case .double(let d): return "\(d)"
-        case .bool(let b): return b ? "true" : "false"
-        }
-    }
-}
-
-/// Build a JS object literal with WE default property values
-func buildWEPropertiesJSON(from project: WEProject) -> String? {
-    guard let props = project.general?.properties, !props.isEmpty else { return nil }
-    var entries: [String] = []
-    for (key, prop) in props {
-        let jsVal = prop.value?.jsValue ?? "\"\""
-        entries.append("\"\(key)\":{\"value\":\(jsVal)}")
-    }
-    return "{\(entries.joined(separator: ","))}"
-}
-
-struct WEParseResult {
-    let source: WallpaperSource
-    let title: String
-    let propertyJS: String?
-}
-
-func parseWEProject(at folderURL: URL) -> WEParseResult? {
-    let projectFile = folderURL.appendingPathComponent("project.json")
-    guard let data = try? Data(contentsOf: projectFile),
-          let project = try? JSONDecoder().decode(WEProject.self, from: data),
-          let type = project.type?.lowercased() else { return nil }
-
-    let title = project.title ?? folderURL.lastPathComponent
-
-    switch type {
-    case "video":
-        guard let file = project.file else { return nil }
-        let filePath = folderURL.appendingPathComponent(file).path
-        return WEParseResult(source: WallpaperSource(type: .video, path: filePath, title: title), title: title, propertyJS: nil)
-    case "web":
-        guard let file = project.file else { return nil }
-        let filePath = folderURL.appendingPathComponent(file).path
-        let propsJSON = buildWEPropertiesJSON(from: project)
-        return WEParseResult(source: WallpaperSource(type: .web, path: filePath, title: title), title: title, propertyJS: propsJSON)
-    case "scene":
-        return parseWEScene(at: folderURL, project: project, title: title)
-    default:
-        return nil
-    }
-}
-
-// MARK: - Scene Support
+// MARK: - PKG extractor
 
 /// Extract files from PKGV binary package (all versions)
 func extractPKG(at url: URL) -> [String: Data]? {
@@ -186,7 +15,6 @@ func extractPKG(at url: URL) -> [String: Data]? {
                (UInt32(bytes[off+2]) << 16) | (UInt32(bytes[off+3]) << 24)
     }
 
-    // Header is a length-prefixed string: uint32 len + "PKGV####"
     var pos = 0
     let headerLen = Int(u32(pos)); pos += 4
     guard headerLen >= 8, pos + headerLen <= bytes.count else { return nil }
@@ -194,10 +22,8 @@ func extractPKG(at url: URL) -> [String: Data]? {
     guard header.hasPrefix("PKGV") else { return nil }
     pos += headerLen
 
-    // File count
     let count = Int(u32(pos)); pos += 4
 
-    // Read entries: each is length-prefixed string + offset + size
     var entries: [(String, Int, Int)] = []
     for _ in 0..<count {
         guard pos + 4 <= bytes.count else { return nil }
@@ -220,7 +46,7 @@ func extractPKG(at url: URL) -> [String: Data]? {
     return result
 }
 
-// Scene JSON models
+// MARK: - scene.json models
 
 struct WEScene: Decodable {
     let camera: WECamera?
@@ -273,13 +99,11 @@ enum WEFlexBool: Decodable {
     private enum CodingKeys: String, CodingKey { case value }
 
     init(from decoder: Decoder) throws {
-        // Try single value first (bool, int, string)
         if let c = try? decoder.singleValueContainer() {
             if let v = try? c.decode(Bool.self) { self = .bool(v); return }
             if let v = try? c.decode(Int.self) { self = .bool(v != 0); return }
             if let _ = try? c.decode(String.self) { self = .bool(true); return }
         }
-        // Try keyed container (dict with "value" key)
         if let c = try? decoder.container(keyedBy: CodingKeys.self) {
             if let v = try? c.decode(Bool.self, forKey: .value) { self = .bool(v); return }
         }
@@ -297,7 +121,6 @@ struct WEEffect: Decodable {
     let name: String?
     let passes: [WEEffectPass]?
     let visible: WEFlexBool?
-    // inline constant values
     let animationspeed: Double?
     let speed: Double?
     let strength: Double?
@@ -411,6 +234,8 @@ enum WENumOrString: Decodable {
     }
 }
 
+// MARK: - Generated metadata (consumed by SceneEngine)
+
 struct SceneMetadata: Codable {
     let sceneWidth: Int
     let sceneHeight: Int
@@ -441,10 +266,10 @@ struct LayerConfig: Codable {
 }
 
 struct EffectConfig: Codable {
-    let type: String  // shader name e.g. "effects/waterripple"
+    let type: String
     let params: [String: Float]
     let maskTexturePath: String?
-    let extraTexturePaths: [String] // additional texture paths (normal maps, phase maps, etc.)
+    let extraTexturePaths: [String]
     let vertexShaderSource: String?
     let fragmentShaderSource: String?
 }
@@ -480,6 +305,8 @@ struct ParticleConfig: Codable {
     var angVelMax: Float = 0
     var rendererType: Int = 0  // 0=sprite, 1=rope
 }
+
+// MARK: - Particle builder
 
 func buildParticleConfig(obj: WESceneObject, particle: WEParticle, isAdditive: Bool,
                           sceneW: Float, sceneH: Float) -> ParticleConfig {
@@ -578,7 +405,6 @@ func buildParticleConfig(obj: WESceneObject, particle: WEParticle, isAdditive: B
         }
     }
 
-    // Determine renderer type
     let renderer = particle.renderer?.first
     let rendererType: Int
     switch renderer?.name {
@@ -615,6 +441,8 @@ func buildParticleConfig(obj: WESceneObject, particle: WEParticle, isAdditive: B
     )
 }
 
+// MARK: - Scene entry point (called from parseWEProject)
+
 func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEParseResult? {
     let pkgFile = folderURL.appendingPathComponent("scene.pkg")
     let sceneDir = configDir.appendingPathComponent("scene_cache/\(folderURL.lastPathComponent)")
@@ -650,16 +478,14 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
     guard let sceneData,
           let scene = decodeWEScene(from: sceneData) else { return nil }
 
-    // Sort objects by dependencies (topological order)
     let orderedObjects = topologicalSort(scene.objects ?? [])
 
-    var particles: [(WESceneObject, WEParticle, Bool)] = [] // (obj, particle, isAdditive)
+    var particles: [(WESceneObject, WEParticle, Bool)] = []
     var waterEffects: [WEEffect] = []
 
     for obj in orderedObjects {
         if let pPath = obj.particle, let pData = particleFiles[pPath] {
             if let p = try? JSONDecoder().decode(WEParticle.self, from: pData) {
-                // Check material blending
                 var isAdditive = false
                 if let matPath = p.material, let matData = materialFiles[matPath] {
                     if let matStr = String(data: matData, encoding: .utf8) {
@@ -677,7 +503,6 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         }
     }
 
-    // Re-extract PKG files (needed for both bg and effects)
     let allFiles: [String: Data]
     if FileManager.default.fileExists(atPath: pkgFile.path) {
         allFiles = extractPKG(at: pkgFile) ?? [:]
@@ -685,7 +510,6 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         allFiles = [:]
     }
 
-    // Decode .tex background, fall back to preview.jpg
     let bgImagePath = sceneDir.appendingPathComponent("background.png")
     var bgDecoded = false
     for obj in orderedObjects where obj.image != nil {
@@ -704,7 +528,6 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         }
     }
 
-    // Extract effects: shader sources, textures, params from ALL objects
     var effectConfigs: [EffectConfig] = []
     for obj in orderedObjects {
       for effect in obj.effects ?? [] {
@@ -717,13 +540,11 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
             shaderName = effectFile.replacingOccurrences(of: ".json", with: "")
         }
 
-        // Load shader sources
         let vertKey = "shaders/\(shaderName).vert"
         let fragKey = "shaders/\(shaderName).frag"
         let vertSrc = allFiles[vertKey].flatMap { String(data: $0, encoding: .utf8) }
         let fragSrc = allFiles[fragKey].flatMap { String(data: $0, encoding: .utf8) }
 
-        // Collect params: effect-level fields first, then constantshadervalues override
         var params: [String: Float] = [:]
         if let v = effect.animationspeed { params["g_AnimationSpeed"] = Float(v) }
         if let v = effect.speed { params["g_FlowSpeed"] = Float(v) }
@@ -733,8 +554,6 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         if let v = effect.ratio { params["g_Ratio"] = Float(v) }
         if let v = effect.scrollspeed { params["g_ScrollSpeed"] = Float(v) }
         if let v = effect.scrolldirection { params["g_Direction"] = Float(v) }
-        // Override from pass constantshadervalues (where WE actually stores per-effect values)
-        // Map material keys to uniform names via the shader annotation mapping
         let csvKeyMap: [String: String] = [
             "animationspeed": "g_AnimationSpeed", "speed": "g_FlowSpeed",
             "strength": "g_FlowAmp", "ripplestrength": "g_Strength",
@@ -743,21 +562,18 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
             "phasescale": "g_FlowPhaseScale",
             "ripplespecularpower": "g_SpecularPower", "ripplespecularstrength": "g_SpecularStrength",
         ]
-        // Set WE shader defaults for uniforms that might not appear in CSV
         let shaderDefaults: [String: Float] = [
             "g_AnimationSpeed": 0.15, "g_Strength": 0.1,
             "g_FlowSpeed": 1.0, "g_FlowAmp": 1.0, "g_FlowPhaseScale": 1.0,
             "g_Scale": 1.0, "g_Ratio": 1.0, "g_ScrollSpeed": 0.0, "g_Direction": 0.0,
             "g_SpecularPower": 1.0, "g_SpecularStrength": 1.0,
         ]
-        for (k, v) in shaderDefaults { params[k] = v } // set defaults first
+        for (k, v) in shaderDefaults { params[k] = v }
         for pass in effect.passes ?? [] {
             for (key, val) in pass.constantshadervalues ?? [:] {
-                // Try direct mapping
                 if let uniformName = csvKeyMap[key] {
                     params[uniformName] = Float(val.value)
                 }
-                // Also try stripping ui_editor_properties_ prefix
                 let stripped = key.replacingOccurrences(of: "ui_editor_properties_", with: "")
                     .replacingOccurrences(of: "_", with: "")
                 if let uniformName = csvKeyMap[stripped] {
@@ -766,20 +582,14 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
             }
         }
 
-        // Extract textures from per-pass texture array in scene.json
-        // Format: [null, "masks/waterflow_mask_xxx", "effects/waterflowphase"]
-        // Index 0 = framebuffer (null), 1 = mask/flow map, 2 = normal/phase map
         var maskPath: String?
         var extraPaths: [String] = []
 
-        // Use texture paths from the first pass (most effects have one pass)
         let passTextures = (effect.passes ?? []).first?.textures ?? []
         for (texIdx, texRef) in passTextures.enumerated() {
-            guard let ref = texRef, texIdx > 0 else { continue } // skip index 0 (framebuffer)
+            guard let ref = texRef, texIdx > 0 else { continue }
 
-            // Try to find the texture in PKG with .tex suffix
             let texKey = ref.hasSuffix(".tex") ? ref : "\(ref).tex"
-            // Also try materials/ prefix if not already present
             let candidates = [texKey, "materials/\(texKey)"]
             var decoded = false
             for candidate in candidates {
@@ -799,7 +609,6 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
             }
         }
 
-        // Fallback: pattern match from PKG if pass textures were empty
         if passTextures.isEmpty || passTextures.allSatisfy({ $0 == nil }) {
             let baseName = URL(string: shaderName)?.lastPathComponent ?? shaderName
             for key in allFiles.keys.sorted() where key.contains("masks/\(baseName)_mask_") && key.hasSuffix(".tex") {
@@ -834,7 +643,6 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
     let sceneW = scene.general?.orthogonalprojection?.width ?? 1920
     let sceneH = scene.general?.orthogonalprojection?.height ?? 1080
 
-    // Build per-layer configs
     var layerConfigs: [LayerConfig] = []
     var effectIdx = 0
     for obj in orderedObjects where obj.image != nil {
@@ -843,10 +651,8 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         let sc = parseVec(obj.scale)
         let pd = parseVec(obj.parallaxDepth)
 
-        // Find this layer's texture path (already decoded above)
         let texPath = bgDecoded ? bgImagePath.path : nil
 
-        // Match effects by index from effectConfigs (built in same order)
         var layerEffects: [EffectConfig] = []
         for _ in obj.effects ?? [] {
             if effectIdx < effectConfigs.count {
@@ -868,14 +674,12 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
         ))
     }
 
-    // Find sound file
     var soundPath: String?
     for key in allFiles.keys where key.hasSuffix(".mp3") || key.hasSuffix(".ogg") || key.hasSuffix(".flac") || key.hasSuffix(".wav") {
         let savePath = sceneDir.appendingPathComponent(URL(fileURLWithPath: key).lastPathComponent)
         try? allFiles[key]?.write(to: savePath)
         soundPath = savePath.path
     }
-    // Also check folder directly
     if soundPath == nil {
         for ext in ["mp3", "ogg", "flac", "wav"] {
             let files = try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)
@@ -912,20 +716,16 @@ func parseWEScene(at folderURL: URL, project: WEProject, title: String) -> WEPar
     )
 }
 
-// MARK: - Scene HTML Generator
+// MARK: - Helpers
 
 /// Decode WEScene, sanitizing problematic float literals that JSONDecoder rejects
 func decodeWEScene(from data: Data) -> WEScene? {
-    // Sanitize: some WE scene.json files have float values with too many digits
-    // that Swift's JSONDecoder rejects (e.g. 0.23000000417232513)
     guard let jsonStr = String(data: data, encoding: .utf8) else { return nil }
-    // Replace problematic floats by scanning character-by-character
     var result = ""
     result.reserveCapacity(jsonStr.count)
     var i = jsonStr.startIndex
     while i < jsonStr.endIndex {
         let ch = jsonStr[i]
-        // Detect number start after : or , or [ or whitespace
         if ch == "-" || ch.isNumber {
             var numEnd = i
             var hasDot = false
@@ -958,7 +758,6 @@ func decodeWEScene(from data: Data) -> WEScene? {
     return try? JSONDecoder().decode(WEScene.self, from: cleaned)
 }
 
-/// Topological sort of scene objects by dependency IDs
 private func topologicalSort(_ objects: [WESceneObject]) -> [WESceneObject] {
     let idMap = Dictionary(uniqueKeysWithValues: objects.compactMap { obj in
         obj.id.map { ($0, obj) }
@@ -982,4 +781,4 @@ private func topologicalSort(_ objects: [WESceneObject]) -> [WESceneObject] {
 private func parseVec(_ s: String?) -> [Double] {
     (s ?? "0 0 0").split(separator: " ").map { Double($0) ?? 0 }
 }
-
+#endif

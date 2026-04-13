@@ -9,7 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wallpaperWindows: [String: NSWindow] = [:]
     private var players: [String: AVPlayer] = [:]
     private var webViews: [String: WKWebView] = [:]
+    #if ENABLE_SCENE
     private var sceneEngines: [String: SceneEngine] = [:]
+    #endif
     private var activeSources: [String: WallpaperSource] = [:]
     private var lastSources: [String: WallpaperSource] = [:]
     private var staticWallpapers: [String: URL] = [:]
@@ -71,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 completionHandler: nil
             )
         }
+        #if ENABLE_SCENE
         // Pass mouse to scene engines
         for (name, engine) in sceneEngines {
             guard let window = wallpaperWindows[name] else { continue }
@@ -78,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard pt.x >= 0, pt.x <= window.frame.width, pt.y >= 0, pt.y <= window.frame.height else { continue }
             engine.updateMouse(Float(pt.x / window.frame.width), Float(1 - pt.y / window.frame.height))
         }
+        #endif
     }
 
     // MARK: - Config
@@ -248,9 +252,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleMute() {
         audioMuted.toggle()
+        #if ENABLE_SCENE
         for engine in sceneEngines.values {
             engine.audioPlayer?.volume = audioMuted ? 0 : 0.5
         }
+        #endif
         rebuildMenu()
     }
 
@@ -442,7 +448,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         players[name]?.pause()
         players.removeValue(forKey: name)
         webViews.removeValue(forKey: name)
+        #if ENABLE_SCENE
         sceneEngines.removeValue(forKey: name)
+        #endif
         wallpaperWindows[name]?.orderOut(nil)
         wallpaperWindows.removeValue(forKey: name)
     }
@@ -464,10 +472,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 propertyJS: wePropertyJS[name]
             )
         case .scene:
+            #if ENABLE_SCENE
             sceneEngines[name] = setupSceneContent(
                 window: window, screen: screen,
                 sceneDir: URL(fileURLWithPath: source.path)
             )
+            #else
+            // Stable build: scene wallpapers are not supported
+            return
+            #endif
         case .image:
             setupImageContent(window: window, screen: screen, path: source.path)
         }

@@ -1,3 +1,4 @@
+#if ENABLE_SCENE
 import Foundation
 import AppKit
 import Compression
@@ -486,3 +487,5 @@ func texToImageFile(_ tex: TexImage, destination: URL) -> Bool {
         return false
     }
 }
+
+#endif

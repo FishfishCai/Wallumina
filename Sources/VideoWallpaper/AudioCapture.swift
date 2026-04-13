@@ -1,3 +1,4 @@
+#if ENABLE_SCENE
 import Foundation
 import AVFoundation
 import Accelerate
@@ -117,3 +118,5 @@ final class AudioCapture {
         return result
     }
 }
+
+#endif

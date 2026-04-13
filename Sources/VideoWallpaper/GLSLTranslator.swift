@@ -1,3 +1,4 @@
+#if ENABLE_SCENE
 import Foundation
 
 /// Translates Wallpaper Engine GLSL effect shaders to Metal Shading Language
@@ -394,3 +395,5 @@ float2 rotateVec2(float2 v, float angle) {
     return float2(v.x * c - v.y * s, v.x * s + v.y * c);
 }
 """
+
+#endif

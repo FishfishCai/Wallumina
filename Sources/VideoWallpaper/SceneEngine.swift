@@ -1,3 +1,4 @@
+#if ENABLE_SCENE
 import AppKit
 import MetalKit
 import AVFoundation
@@ -834,3 +835,4 @@ struct ParticleSystem {
             angularVelocity: srand(config.angVelMin, config.angVelMax))
     }
 }
+#endif
