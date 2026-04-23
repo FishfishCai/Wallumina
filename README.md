@@ -1,4 +1,4 @@
-# VideoWallpaper
+# Wallumina
 
 A macOS menu bar app that plays videos, images, or Wallpaper Engine wallpapers as your desktop wallpaper.
 
